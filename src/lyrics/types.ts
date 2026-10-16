@@ -1,6 +1,6 @@
 // 移植自 folia-major src/types.ts + src/types/onlineMusic.ts @ 7db1ad56
 // 改动：只摘取歌词解析与歌曲元数据相关的类型；删掉了 UI 相关 import（lucide-react / framer-motion）
-//      和 UnifiedSong（只有 neteaseProvider 用，本项目不涉及）。
+//      和 UnifiedSong（只有 neteaseProvider 用，本项目不涉及）；另补摘 5 组传递依赖类型（见文内分节注释）。
 
 // ===== 以下摘自 src/types.ts =====
 
@@ -256,7 +256,3 @@ export interface LineRenderHints {
     lineTransitionMode: LineTransitionMode;
     wordRevealMode: WordRevealMode;
 }
-
-// 摘自 src/utils/lyrics/formatDetection.ts + parserCore.ts（lyricOptions.ts 的 RawLocalFileLyric.formatHint 引用）
-export type TimedLyricFormat = 'lrc' | 'enhanced-lrc' | 'vtt' | 'ttml';
-export type LyricParseFormat = TimedLyricFormat | 'yrc' | 'qrc' | 'krc' | 'awlrc';

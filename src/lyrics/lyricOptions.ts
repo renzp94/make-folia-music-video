@@ -2,7 +2,7 @@
 // 改动：import 路径改为 ./types；删掉 RawNavidromeLyric 接口、其 navidrome import，以及 RawLyricSource 联合中的对应成员（本项目不涉及 Navidrome）。
 
 import { LyricData } from './types';
-import type { LyricParseFormat } from './types';
+import type { LyricParseFormat } from './parserCore';
 
 export type UnifiedLyric = LyricData;
 
