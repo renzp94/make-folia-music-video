@@ -59,4 +59,28 @@ assert.deepEqual(
   [['等待', 12, 12.5], ['换来', 12.5, 13], ['是够钟', 13, 13.6]],
 );
 
+// ── 搜索词构造：歌名 + 歌手 → 送给 API 的 keyword
+import { buildLyricSearchQuery, buildKugouLyricSearchQuery } from '../src/lyrics/searchQuery.ts';
+assert.ok(buildLyricSearchQuery('街角的晚风', '陈小春').includes('街角的晚风'));
+assert.ok(buildKugouLyricSearchQuery('街角的晚风').includes('街角的晚风'),
+  '酷狗的搜索词要保留原标题，别做简繁转换');
+
+// ── 打分：同名同歌手、时长接近的应当排第一
+import { calculateMatchScoreDetails } from '../src/lyrics/matchScore.ts';
+import { normalizeLyricMatchDurationMs } from '../src/lyrics/duration.ts';
+const target = { title: '街角的晚风', artist: '陈小春', durationMs: 250_000 };
+const exact = calculateMatchScoreDetails(target, {
+  id: '1', name: '街角的晚风', artists: [{ name: '陈小春' }], durationMs: 249_000,
+} as any);
+const wrong = calculateMatchScoreDetails(target, {
+  id: '2', name: '完全不相干的歌', artists: [{ name: '别人' }], durationMs: 100_000,
+} as any);
+assert.ok(exact.score > wrong.score, `精确匹配(${exact.score}) 必须高于错误匹配(${wrong.score})`);
+assert.equal(exact.titleMatched, true);
+assert.equal(exact.artistMatched, true);
+
+// ── 时长归一：>12 小时视为误传的「毫秒×1000」
+assert.equal(normalizeLyricMatchDurationMs(250_000), 250_000, '正常的毫秒原样返回');
+assert.equal(normalizeLyricMatchDurationMs(250_000_000), 250_000, '误传的毫秒×1000 要还原');
+
 console.log('✓ lyrics-selftest 全部通过');
