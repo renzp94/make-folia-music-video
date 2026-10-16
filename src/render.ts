@@ -131,6 +131,33 @@ export async function ffmpegVersion(bin: string): Promise<string | null> {
   }
 }
 
+/**
+ * 用 ffmpeg 读音频时长（秒）。取不到返回 undefined。
+ *
+ * `ffmpeg -i <文件>` 不给输出文件时会以**非零退出码**结束 —— 那是正常的，
+ * 时长信息照样打在 stderr 上，所以这里不看退出码、只解析 stderr。
+ *
+ * 放在这里（而不是 index.ts 里）是因为 TUI 也要用：联网取词必须把音频的**真实**时长
+ * 交给打分，而打分对时长差 >10s 有十倍惩罚，传错会直接选错歌。index.ts 和 tui.tsx
+ * 都 import 它，就不必各写一份。
+ */
+export async function probeDurationSec(
+  audioPath: string,
+  preference: FfmpegPreference = 'auto',
+): Promise<number | undefined> {
+  try {
+    const proc = Bun.spawn([await resolveFfmpeg(preference), '-i', audioPath],
+      { stdin: 'ignore', stdout: 'ignore', stderr: 'pipe' });
+    const text = await new Response(proc.stderr).text();
+    await proc.exited;
+    const m = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(text);
+    if (!m) return undefined;
+    return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+  } catch {
+    return undefined;
+  }
+}
+
 export { EMBEDDED_FFMPEG_VERSION };
 
 /** 用户指定了 ffmpeg 来源、但那份用不了时抛这个 —— 界面据此提示改用内置的。 */

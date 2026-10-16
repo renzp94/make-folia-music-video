@@ -3,12 +3,18 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import type { LyricSourceId } from './lyrics/fetch.ts';
 
 export type FfmpegChoice = 'auto' | 'system' | 'embedded';
+
+/** 联网取词用哪个源。`auto` = 按 fetch.ts 的默认顺序 qq → kugou → amll 依次试。 */
+export type LyricSourceChoice = 'auto' | LyricSourceId;
 
 export interface Config {
   /** 用哪一份 ffmpeg。写在这里之后启动就不再问了。 */
   ffmpeg?: FfmpegChoice;
+  /** 联网取词用哪个歌词源。不写就是 `auto`。 */
+  lyricSource?: LyricSourceChoice;
 }
 
 export const CONFIG_PATH = join(homedir(), '.config', 'folia-video', 'config.json');

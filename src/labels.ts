@@ -30,6 +30,15 @@ export const FFMPEG_LABELS: readonly Pair[] = [
   ['auto', '自动'], ['system', '电脑上的'], ['embedded', '内置'],
 ];
 
+/**
+ * 联网取词用的歌词源。键与 `LyricSourceId` 对齐，外加一个 `auto`（依次试）。
+ * 这里只存标签，不 import `lyrics/fetch.ts` —— Pair 是纯字符串表，没必要把
+ * （会连带三个 provider 的）类型图拉进来。
+ */
+export const LYRIC_SOURCE_LABELS: readonly Pair[] = [
+  ['auto', '自动'], ['qq', 'QQ 音乐'], ['kugou', '酷狗音乐'], ['amll', 'AMLL'],
+];
+
 /** [名称, 宽, 高] */
 export const QUALITIES: ReadonlyArray<readonly [name: string, w: number, h: number]> = [
   ['720p', 1280, 720], ['1080p', 1920, 1080],
