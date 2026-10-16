@@ -1,10 +1,26 @@
-// 联网冒烟：真去 QQ 音乐搜一首歌并把逐字歌词打出来。
+// 联网冒烟：真去 QQ / 酷狗音乐搜一首歌并把逐字歌词打出来。
 // 跑法：bun tools/lyrics-fetch-check.ts "陈小春 - 街角的晚风"
+//       bun tools/lyrics-fetch-check.ts "陈小春 - 街角的晚风" kugou
 // 依赖网络，不放进 CI；解析逻辑的测试在 lyrics-selftest.ts 里。
 import { searchQQLyrics, fetchQQLyrics } from '../src/lyrics/providers/qq.ts';
 import { calculateMatchScoreDetails } from '../src/lyrics/matchScore.ts';
 
 const keyword = process.argv[2] ?? '周杰伦 - 给我一首歌的时间';
+
+// 用法：bun tools/lyrics-fetch-check.ts "陈小春 - 街角的晚风" kugou
+if (process.argv[3] === 'kugou') {
+  const { searchKugouLyrics, fetchKugouLyrics } = await import('../src/lyrics/providers/kugou.ts');
+  const list = await searchKugouLyrics(keyword);
+  console.log(`酷狗 → ${list.length} 条候选`);
+  if (list.length) {
+    const d = await fetchKugouLyrics(list[0]);
+    console.log(`isWordByWord=${d?.isWordByWord}  行数=${d?.lines.length}`);
+    const l = d?.lines.find((x: any) => x.words.length > 1);
+    if (l) for (const w of l.words.slice(0, 5)) console.log(`    「${w.text}」 ${w.startTime.toFixed(2)}~${w.endTime.toFixed(2)}s`);
+  }
+  process.exit(0);
+}
+
 const songs = await searchQQLyrics(keyword, 1, 10);
 console.log(`搜索「${keyword}」→ ${songs.length} 条候选`);
 for (const s of songs.slice(0, 3)) {

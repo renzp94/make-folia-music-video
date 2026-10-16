@@ -8,3 +8,9 @@ declare module '*.css' {
   const path: string;
   export default path;
 }
+
+// blueimp-md5 不带类型声明（酷狗源的签名计算用到）。
+declare module 'blueimp-md5' {
+  const md5: (input: string) => string;
+  export default md5;
+}
