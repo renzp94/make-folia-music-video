@@ -531,11 +531,19 @@ sed -i '' "s|from '\.\./parserCore'|from '../parserCore'|g"  src/lyrics/provider
 sed -i '' "s|from '\.\./formatDetection'|from '../formatDetection'|g" src/lyrics/providers/*.ts
 sed -i '' "s|from '\.\./chorusEffects'|from '../chorusEffects'|g"     src/lyrics/providers/*.ts
 sed -i '' "s|from '\.\./searchQuery'|from '../searchQuery'|g"         src/lyrics/providers/*.ts
-sed -i '' "s|from '\.\./\.\./coverUrl'|from './coverUrl'|g"           src/lyrics/providers/*.ts
 grep -n "from '" src/lyrics/providers/*.ts | grep "\.\./"
 ```
 
 Expected: 最后一条 grep **无输出**。
+
+**⚠️ `coverUrl` 要单独处理，别把它也塞进 sed**：上游 `qqLyricProvider.ts:14` 有一行
+`import { getOriginalCoverUrl } from '../../coverUrl';`，而 `src/utils/coverUrl.ts`
+（210 行）**不搬**。做法是：
+1. **删掉那行 import**
+2. 把文件里所有 `getOriginalCoverUrl(x)` 的调用**内联成 `x`** —— 它只是把封面 URL 转成缩略图，
+   对离线渲染没有影响（渲染页收到的封面本来就会被 `render.ts` 的 `loadCover` 统一缩放）
+
+若把这行也塞进 sed，它会变成 `./coverUrl` 指向一个不存在的文件，`bun check` 立刻报错。
 
 - [ ] **Step 4: 写联网冒烟脚本**
 
@@ -631,13 +639,35 @@ grep -n "lyric-proxy\|isElectron" src/lyrics/providers/kugou.ts
 ```
 Expected: 无输出。
 
+**这一步还没完 —— `krcDecrypt.ts` 有个已知的 Bun 不兼容必须一并修**：
+
+上游 `krcDecrypt.ts` 的解压逻辑用 `DecompressionStream('deflate')`。**这个写法在 Bun 下必然失败**：
+酷狗解密后的数据带尾部填充，Bun 会在吐出任何数据前就抛 `ERR_TRAILING_JUNK_AFTER_STREAM_END`
+（Chromium 会宽容地忽略尾部填充，Bun 不会；上游那个「chunks 为空就 throw」的容错分支救不回来）。
+Task 4 的 `qrcDecrypt.ts` 已经踩过同一个坑并改掉了，**用户已批准这个偏离**。
+
+改法与 Task 4 保持一致 —— 把解压那一段换成 `node:zlib.inflateSync`，**XOR 解密部分逐字节不动**：
+
+```ts
+import { inflateSync } from 'node:zlib';
+// 上游此处用 DecompressionStream('deflate')。Bun 在流尾有填充时会抛
+// ERR_TRAILING_JUNK_AFTER_STREAM_END（Chromium 会忽略），故换成 zlib（同样忽略尾部填充）。
+```
+
+文件头来源注释里要把这次改动和原因写清楚（这是本任务除 import 路径、网络层之外的第三类改动）。
+
 - [ ] **Step 3: 修 import 路径**
+
+**注意**：Task 4 那次 sed 只作用于**当时已存在**的文件（只有 `qq.ts`），**不会覆盖你刚拷进来的这些**。
+所以这里要自己跑一遍：
 
 ```bash
 cd /Users/mr.r/Documents/xgamer/github/renzp94/folia-music-video
-grep -n "from '" src/lyrics/providers/kugou.ts | grep "\.\./"
+sed -i '' "s|from '\.\./\.\./\.\./types'|from '../types'|g" src/lyrics/providers/kugou.ts
+grep -n "from '" src/lyrics/providers/kugou.ts src/lyrics/providers/krcDecrypt.ts | grep "\.\./"
 ```
-Expected: 无输出（Task 4 Step 3 的 sed 已经覆盖了 providers/ 下所有文件）。
+Expected: grep **无输出**。（`krcDecrypt.ts` 上游不含 import，sed 对它无匹配是正常的，
+一并 grep 它没有坏处。）
 
 - [ ] **Step 4: 加来源注释（两个文件）**
 
@@ -723,10 +753,15 @@ const getAmllApiUserAgent = (): string | null => null;
 
 - [ ] **Step 4: 修 import 路径 + 加来源注释**
 
+这两个文件**各只有一处** import 需要改（`'../../../types'` → `'../types'`）。它们内部对
+`'../parserCore'`、`'./amllApi'` 的引用在新目录布局下**本来就是对的，不要动**：
+
 ```bash
+cd /Users/mr.r/Documents/xgamer/github/renzp94/folia-music-video
+sed -i '' "s|from '\.\./\.\./\.\./types'|from '../types'|g" src/lyrics/providers/amll*.ts
 grep -n "from '" src/lyrics/providers/amll*.ts | grep "\.\./"
 ```
-Expected: 无输出。
+Expected: grep **无输出**。
 
 - [ ] **Step 5: 联网冒烟**
 
@@ -734,7 +769,9 @@ Expected: 无输出。
 cd /Users/mr.r/Documents/xgamer/github/renzp94/folia-music-video
 bun -e "
 import { searchAmllDbSongs, fetchAmllDbLyrics } from './src/lyrics/providers/amllDbProvider.ts';
-const items = await searchAmllDbSongs({ musicName: '晴天', artistName: '周杰伦' }, 5);
+// ⚠️ searchAmllDbSongs 在「搜不到 / 限流 / 服务端错误 / 网络错误」时返回 **null**
+//（上游刻意用它区分「搜不到」和「没搜成」）。必须先兜住再取 length，否则脚本崩在 items.length。
+const items = (await searchAmllDbSongs({ musicName: '晴天', artistName: '周杰伦' }, 5)) ?? [];
 console.log('候选:', items.length);
 if (items[0]) {
   const id = items[0].ncmMusicIds?.[0];
@@ -1004,10 +1041,10 @@ if (lrcPath) {
 
 ```bash
 cd /Users/mr.r/Documents/xgamer/github/renzp94/folia-music-video
-# 先确认：不给 --lrc、且 test/ 下没有同名 lrc 时会走联网
-mv "test/陈小春 - 街角的晚风.lrc" /tmp/keep.lrc
-bun index.ts "test/陈小春 - 街角的晚风.mp3" --start 40 --duration 8 --out /tmp/lyric-test.mp4
-mv /tmp/keep.lrc "test/陈小春 - 街角的晚风.lrc"
+# 先确认：不给 --lrc、且 local-test/ 下没有同名 lrc 时会走联网
+mv "local-test/陈小春 - 街角的晚风.lrc" /tmp/keep.lrc
+bun index.ts "local-test/陈小春 - 街角的晚风.mp3" --start 40 --duration 8 --out /tmp/lyric-test.mp4
+mv /tmp/keep.lrc "local-test/陈小春 - 街角的晚风.lrc"
 ```
 
 Expected: 终端打印「歌词来源：qq/kugou ...」以及「逐字/仅行级」，然后正常渲染。
@@ -1017,8 +1054,8 @@ Expected: 终端打印「歌词来源：qq/kugou ...」以及「逐字/仅行级
 用同一段音频渲染两次，一次用原 `.lrc`（行级估算），一次用联网取得的逐字歌词，对比 `/tmp` 下两个 mp4 在同一时间点（比如 1 分 4 秒那句「等待换来是够钟」）的画面。
 
 ```bash
-bun index.ts "test/陈小春 - 街角的晚风.mp3" --lrc "test/陈小春 - 街角的晚风.lrc" --start 60 --duration 6 --out /tmp/estimated.mp4
-bun index.ts "test/陈小春 - 街角的晚风.mp3" --start 60 --duration 6 --out /tmp/wordbyword.mp4
+bun index.ts "local-test/陈小春 - 街角的晚风.mp3" --lrc "local-test/陈小春 - 街角的晚风.lrc" --start 60 --duration 6 --out /tmp/estimated.mp4
+bun index.ts "local-test/陈小春 - 街角的晚风.mp3" --start 60 --duration 6 --out /tmp/wordbyword.mp4
 ```
 
 Expected: `wordbyword.mp4` 里「是够钟」三个字亮起的时间点，明显比 `estimated.mp4` 更贴合人声。
@@ -1097,7 +1134,7 @@ bun index.ts
 
 **全部完成后的端到端验收**：
 1. `bun tools/lyrics-fetch-check.ts "陈小春 - 街角的晚风"` 能打印逐字时间
-2. `bun index.ts "test/陈小春 - 街角的晚风.mp3" --start 60 --duration 6 --out /tmp/a.mp4` 走联网歌词并渲染成功
+2. `bun index.ts "local-test/陈小春 - 街角的晚风.mp3" --start 60 --duration 6 --out /tmp/a.mp4` 走联网歌词并渲染成功
 3. 人工对比：`/tmp/a.mp4` 里「是够钟」的亮起时间比行级估算版更贴合人声（这正是 `docs/TODO.md` 第 1 条记的那个问题）
 4. TUI 里选「自动获取」能跑通
 5. **打包后仍能用**（这对应「内置到应用中」）：`bun run build:app`，然后直接用 `./dist/folia-video` 跑一次联网取词。
