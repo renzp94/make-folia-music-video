@@ -38,19 +38,23 @@ bun index.ts <音频> [歌词.lrc] [选项]
 | `--crf <n>` | H.264 质量，越小画质越好文件越大（默认 16） |
 | `--workers <n>` | 并行 Chrome 数（默认 1＝单片）。**>1 目前会出画面问题**，见下 |
 | `--site <目录>` | bundle 所在目录（默认用内嵌的那份） |
+| `--source <源>` | 歌词源 `qq`\|`kugou`\|`amll`（默认按这个顺序依次试） |
+| `--no-fetch` | 找不到歌词文件时不要联网搜，直接报错 |
 
 视觉效果可选值（14 个）：`classic` `partita` `cadenza` `fume` `monet` `cappella` `tilt` `claddagh` `pendolo` `sonnet` `tempera` `lumiere` `diorama` `still`
 
 背景可选值（6 个）：`latent` `common` `monet` `nomand` `sora` `url`
 
+不传第二个参数时，先找与音频同名的 `.lrc`；**没有就连网上 QQ / 酷狗 / AMLL 搜一遍**（按此顺序，`--source` 可指定单个源，`--no-fetch` 可关掉）。搜出来的往往是逐字歌词，比行级 `.lrc` 估算的逐字效果更准。
+
 例子：
 
 ```bash
 # 整首
-bun index.ts "test/陈小春 - 街角的晚风.mp3"
+bun index.ts "local-test/陈小春 - 街角的晚风.mp3"
 
 # 只渲 20-28 秒，试效果
-bun index.ts "test/陈小春 - 街角的晚风.mp3" --start 20 --duration 8 --out /tmp/try.mp4
+bun index.ts "local-test/陈小春 - 街角的晚风.mp3" --start 20 --duration 8 --out /tmp/try.mp4
 
 # 歌词慢了半秒
 bun index.ts song.mp3 --offset -500

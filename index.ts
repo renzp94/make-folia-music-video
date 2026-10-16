@@ -9,7 +9,8 @@ import {
   MODE_LABELS, BACKGROUND_LABELS, INTENSITY_LABELS, labelOf, qualityNameOf,
 } from './src/labels.ts';   // 必须在任何 ink 相关模块之前执行，见该文件里的说明
 
-import { parseLrc } from './src/lrc.ts';
+import { parseLrc, type Line } from './src/lrc.ts';
+import { fetchLyrics, parseTrackName, type LyricSourceId } from './src/lyrics/fetch.ts';
 import { renderToMp4, resolveFfmpeg } from './src/render.ts';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,7 +27,14 @@ interface Opts {
   width?: string; height?: string; fps?: string;
   mode?: string; background?: string; intensity?: string;
   crf?: string; workers?: string; site?: string; cover?: string;
+  /** 歌词源。不给就是 qq → kugou → amll 依次试。 */
+  source?: string;
+  /** 关掉「找不到歌词文件就联网搜」。 */
+  noFetch?: string;
 }
+
+/** 可选的歌词源，同时也是 `--source` 的合法取值顺序。 */
+const LYRIC_SOURCES: readonly LyricSourceId[] = ['qq', 'kugou', 'amll'];
 
 /**
  * 找 bundle 所在目录（site/，里面是 9.8 MB 的 visualizer.js + CSS）。
@@ -50,10 +58,31 @@ function parseArgs(argv: string[]): Opts {
     if (a.startsWith('--')) {
       const k = a.slice(2);
       const v = argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[++i] : 'true';
-      Object.assign(o, { [k]: v });
+      Object.assign(o, { [k === 'no-fetch' ? 'noFetch' : k]: v });
     } else o._.push(a);
   }
   return o;
+}
+
+/**
+ * 用 ffmpeg 读音频时长（秒）。取不到返回 undefined。
+ *
+ * `ffmpeg -i <文件>` 不给输出文件时会以**非零退出码**结束 —— 那是正常的，
+ * 时长信息照样打在 stderr 上，所以这里不看退出码、只解析 stderr。
+ * 时长要准：上游打分对它有十倍惩罚档，传错会直接选错歌（见 task-8 brief）。
+ */
+async function probeDurationSec(audioPath: string): Promise<number | undefined> {
+  try {
+    const proc = Bun.spawn([await resolveFfmpeg(), '-i', audioPath],
+      { stdin: 'ignore', stdout: 'ignore', stderr: 'pipe' });
+    const text = await new Response(proc.stderr).text();
+    await proc.exited;
+    const m = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(text);
+    if (!m) return undefined;
+    return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+  } catch {
+    return undefined;
+  }
 }
 
 export async function main(argv = Bun.argv.slice(2)): Promise<number> {
@@ -64,7 +93,7 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
   if (o._.length === 0) {
     // 无参数 → 进界面。界面退出后才开始渲染，避免渲染日志和 ink 抢终端。
     const { runTui } = await import('./src/tui.tsx');
-    const testDir = join(here, 'test');
+    const testDir = join(here, 'local-test');
     // 界面自己跑渲染（进度就显示在「开始渲染」按钮下面），退出时整个任务就结束了 ——
     // 所以这里不需要再拿它选好的参数去走一遍命令行流程。
     await runTui({ startDir: existsSync(testDir) ? testDir : process.cwd() });
@@ -74,21 +103,47 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
   const audioPath = o._[0];
   if (!existsSync(audioPath)) { console.error(`找不到音频：${audioPath}`); return 2; }
 
-  // 歌词：显式指定 > 同名 .lrc
+  // 歌词：显式指定 > 同名 .lrc > 联网搜（--no-fetch 关掉最后一步）
   let lrcPath = o._[1] ?? null;
+  if (lrcPath && !existsSync(lrcPath)) { console.error(`找不到歌词文件：${lrcPath}`); return 2; }
   if (!lrcPath) {
     const guess = audioPath.replace(/\.[^.]+$/, '.lrc');
     if (existsSync(guess)) lrcPath = guess;
   }
-  if (!lrcPath || !existsSync(lrcPath)) {
-    console.error('找不到歌词文件（同名 .lrc 也没有）。请提供 .lrc。');
+  if (o.source && !LYRIC_SOURCES.includes(o.source as LyricSourceId)) {
+    console.error(`--source 只能是 ${LYRIC_SOURCES.join(' | ')}，收到「${o.source}」。`);
     return 2;
   }
 
   // --offset 叠加在 LRC 自带的 [offset:] 上；正值＝歌词提前（与 Folia 的 lyricTimelineOffsetMs 同向）
   const offsetMs = o.offset === undefined ? 0 : Number(o.offset) || 0;
-  const { lines, meta } = parseLrc(readFileSync(lrcPath, 'utf8'), offsetMs);
-  if (lines.length === 0) { console.error(`歌词为空：${lrcPath}`); return 2; }
+  let lines: Line[] = [];
+  let lyricFrom: string;                        // 展示用：这份歌词打哪来
+  if (lrcPath) {
+    const parsed = parseLrc(readFileSync(lrcPath, 'utf8'), offsetMs);
+    if (parsed.lines.length === 0) { console.error(`歌词为空：${lrcPath}`); return 2; }
+    lines = parsed.lines;
+    lyricFrom = `${lrcPath}（${lines.length} 行${parsed.meta.ti ? ` · ${parsed.meta.ti}` : ''}）`;
+  } else if (o.noFetch) {
+    // 用户明确关掉联网，保留旧行为：没文件就报错，别偷偷发网络请求
+    console.error('没有歌词文件（同名 .lrc 也没有），且指定了 --no-fetch。请提供 .lrc。');
+    return 2;
+  } else {
+    const { title, artist } = parseTrackName(basename(audioPath, extname(audioPath)));
+    const durationSec = await probeDurationSec(audioPath);
+    const found = await fetchLyrics(
+      { title, artist, durationSec },
+      { sources: o.source ? [o.source as LyricSourceId] : undefined, onLog: (m) => console.log(m) },
+    );
+    if (!found) {
+      console.error('没找到歌词。可以自己给一份 .lrc 放到音频旁边，或换 --source 再试。');
+      return 2;
+    }
+    // fetch.ts 的 toRenderLines 已经在每行补上了 text，但 FetchLyricsResult.lines 声明的是
+    // 上游那份没有 text 的 Line —— 断言补回本项目的 Line（字段与运行时一致，只是类型丢了）。
+    lines = found.lines as Line[];
+    lyricFrom = `${found.source}（${found.songName} - ${found.artist}，${found.isWordByWord ? '逐字' : '仅行级'}）`;
+  }
 
   // 片段渲染：调 offset / 看某一小段效果时，只跑这几秒（比整首快一个数量级）。
   const startSec = o.start === undefined ? 0 : Number(o.start) || 0;
@@ -132,8 +187,8 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
   const outFps = num(o.fps, 60);
 
   console.log(`音频    ${audioPath}`);
-  console.log(`歌词    ${lrcPath}（${lines.length} 行${meta.ti ? ` · ${meta.ti}` : ''}）`
-    + (offsetMs ? `
+  console.log(`歌词    ${lyricFrom}`
+    + (lrcPath && offsetMs ? `
 偏移    ${offsetMs > 0 ? '+' : ''}${offsetMs} ms（正值＝歌词提前）` : ''));
   console.log(`效果    ${labelOf(MODE_LABELS, mode)} (${mode})`
     + ` · 背景 ${labelOf(BACKGROUND_LABELS, background)}`
@@ -209,9 +264,11 @@ function printHelp(): void {
   --crf <数值>        H.264 质量，越小越好（默认 16）
   --workers <数量>    并行 Chrome 实例数（默认 1＝单片）。>1 目前会出画面问题，勿用
   --site <目录>       bundle 所在目录（默认内置）
+  --source <源>       歌词源 qq|kugou|amll（默认依次试）
+  --no-fetch          找不到歌词文件时不要联网搜，直接报错
 
 歌词
-  不传第二个参数时，会自动找与音频同名的 .lrc。`);
+  不传第二个参数时，先找与音频同名的 .lrc；没有就联网搜（--no-fetch 可关掉）。`);
 }
 
 if (import.meta.main) {
