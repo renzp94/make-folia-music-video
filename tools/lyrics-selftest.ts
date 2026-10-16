@@ -83,4 +83,20 @@ assert.equal(exact.artistMatched, true);
 assert.equal(normalizeLyricMatchDurationMs(250_000), 250_000, '正常的毫秒原样返回');
 assert.equal(normalizeLyricMatchDurationMs(250_000_000), 250_000, '误传的毫秒×1000 要还原');
 
+// ── 从音频文件名猜「歌手 - 歌名」
+import { parseTrackName } from '../src/lyrics/fetch.ts';
+assert.deepEqual(parseTrackName('陈小春 - 街角的晚风'), { artist: '陈小春', title: '街角的晚风' });
+assert.deepEqual(parseTrackName('周杰伦-给我一首歌的时间'), { artist: '周杰伦', title: '给我一首歌的时间' });
+assert.deepEqual(parseTrackName('只有歌名'), { artist: '', title: '只有歌名' },
+  '没有分隔符时整串当歌名，artist 留空');
+assert.deepEqual(parseTrackName('A - B - C'), { artist: 'A', title: 'B - C' },
+  '只在第一个分隔符处切，歌名里允许有短横');
+
+// ── Folia 的 Line → 本项目的 Line（补上 render.ts 要的 text 字段）
+import { toRenderLines } from '../src/lyrics/fetch.ts';
+const foliaLines = [{ fullText: '等待换来是够钟', startTime: 12, endTime: 13.6, words: [{ text: '等待', startTime: 12, endTime: 12.5 }] }];
+const out = toRenderLines(foliaLines as any);
+assert.equal(out[0].text, '等待换来是够钟', 'render.ts 读 l.text ?? l.fullText，补上 text 更稳');
+assert.equal(out[0].words[0].startTime, 12);
+
 console.log('✓ lyrics-selftest 全部通过');
