@@ -1,6 +1,10 @@
 // 移植自 folia-major src/types.ts + src/types/onlineMusic.ts @ 7db1ad56
 // 改动：只摘取歌词解析与歌曲元数据相关的类型；删掉了 UI 相关 import（lucide-react / framer-motion）
-//      和 UnifiedSong（只有 neteaseProvider 用，本项目不涉及）；另补摘 5 组传递依赖类型（见文内分节注释）。
+//      和 UnifiedSong（只有 neteaseProvider 用，本项目不涉及）；另补摘 5 组传递依赖类型（见文内分节注释）；
+//      LineRenderHints（连同 LineTimingClass / LineTransitionMode / WordRevealMode）改为从 ./renderHints
+//      导入，与上游 src/types.ts:2 一致，不再本地重复定义（此前是 renderHints.ts 未搬入时的临时绕行）。
+
+import type { LineRenderHints } from './renderHints';
 
 // ===== 以下摘自 src/types.ts =====
 
@@ -242,17 +246,4 @@ export interface ProviderArtistSummary {
     name: string;
     entityId?: string;
     catalogRef?: ProviderCatalogRef;
-}
-
-// 摘自 src/utils/lyrics/renderHints.ts（Line.renderHints 引用）
-export type LineTimingClass = 'normal' | 'short' | 'micro';
-export type LineTransitionMode = 'normal' | 'fast' | 'none';
-export type WordRevealMode = 'normal' | 'fast' | 'instant';
-
-export interface LineRenderHints {
-    rawDuration: number;
-    timingClass: LineTimingClass;
-    renderEndTime: number;
-    lineTransitionMode: LineTransitionMode;
-    wordRevealMode: WordRevealMode;
 }
