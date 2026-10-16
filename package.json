@@ -4,8 +4,13 @@
   "type": "module",
   "description": "把 EchoMusic 的 Folia 歌词页离线渲染成 MP4（不是录屏）",
   "dependencies": {
+    "@applemusic-like-lyrics/ttml": "1.0.1",
+    "@xmldom/xmldom": "0.9.12",
+    "blueimp-md5": "2.19.0",
     "ink": "^8.0.0",
-    "react": "^19.3.1"
+    "opencc-js": "1.4.2",
+    "react": "^19.3.1",
+    "wanakana": "5.3.1"
   },
   "scripts": {
     "start": "bun index.ts",
