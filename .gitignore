@@ -1,0 +1,19 @@
+# 依赖
+node_modules/
+
+# 构建产物（bun run build:app / build:mac 的输出）
+dist/
+
+# 渲染中间产物：每帧一张 jpg，正常应该在渲染结束后清掉。
+# 还在说明是残留 —— 见 test/ 下那几个 .frames-* 目录。
+.frames-*/
+
+# 渲染产物
+*.mp4
+
+# macOS
+.DS_Store
+
+# 编辑器
+.idea/
+.vscode/
