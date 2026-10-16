@@ -5,7 +5,7 @@ node_modules/
 dist/
 
 # 渲染中间产物：每帧一张 jpg，正常应该在渲染结束后清掉。
-# 还在说明是残留 —— 见 test/ 下那几个 .frames-* 目录。
+# 还在说明是残留 —— 见 local-test/ 下那几个 .frames-* 目录。
 .frames-*/
 
 # 渲染产物
@@ -17,3 +17,11 @@ dist/
 # 编辑器
 .idea/
 .vscode/
+out/
+local-test/
+.superpowers/
+
+# ⚠️ vendor/ 是**故意不忽略**的，别再加回来。
+# 里面是内嵌进产物的 ffmpeg 静态二进制（52 MB），构建必需。
+# 它曾因被 .gitignore 排除、又被 `git clean -fdx` 扫到而整个删掉过一次，
+# 从废纸篓和 Spotlight 都找不回来。纳入版本控制是防这个的唯一办法。

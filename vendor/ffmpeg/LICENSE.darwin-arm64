@@ -1,0 +1,18 @@
+vendor/ffmpeg/ffmpeg-darwin-arm64
+==============================
+
+这是内嵌进单文件可执行程序的 ffmpeg，用来做帧序列的合成与封装（以及给封面图缩放）。
+
+来源：https://www.osxexperts.net/ffmpeg9arm.zip
+版本：ffmpeg 9.0（macOS arm64 静态构建，Apple clang 13.1.6）
+大小：约 52 MB
+
+该构建的 configure 带有 --enable-gpl（含 x264/x265 等），因此这个二进制以
+**GPL** 分发。FFmpeg 本身的许可证说明见 https://ffmpeg.org/legal.html
+
+本项目整体也在 AGPL-3.0 之下（因为 site/visualizer.js 来自同样是 AGPL 的 folia-major）。
+
+换二进制时的注意事项：
+1. 替换 ffmpeg-darwin-arm64 后，同步 src/assets.ts 里的 EMBEDDED_FFMPEG_VERSION
+2. 确认是 arm64 Mach-O：`file vendor/ffmpeg/ffmpeg-darwin-arm64`
+3. 确认能跑：`vendor/ffmpeg/ffmpeg-darwin-arm64 -version`

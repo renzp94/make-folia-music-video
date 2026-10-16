@@ -29,7 +29,7 @@ export const EMBEDDED_FFMPEG = ffmpegBin as unknown as string;
 
 /**
  * 内置 ffmpeg 的版本号，用来在启动界面上和用户自己那份做对比。
- * 构建时写死 —— 运行时去 `-version` 问它得先把 43 MB 释放到磁盘，只为显示一行字不值当。
+ * 构建时写死 —— 运行时去 `-version` 问它得先把 52 MB 释放到磁盘，只为显示一行字不值当。
  * 换了 vendor/ffmpeg/ 里的二进制时记得同步这里。
  */
-export const EMBEDDED_FFMPEG_VERSION = '7.1';
+export const EMBEDDED_FFMPEG_VERSION = '9.0';
