@@ -34,7 +34,7 @@ interface Opts {
 }
 
 /** 可选的歌词源，同时也是 `--source` 的合法取值顺序。 */
-const LYRIC_SOURCES: readonly LyricSourceId[] = ['qq', 'kugou', 'amll'];
+const LYRIC_SOURCES: readonly LyricSourceId[] = ['kugou', 'qq', 'amll'];
 
 /**
  * 找 bundle 所在目录（site/，里面是 9.8 MB 的 visualizer.js + CSS）。

@@ -36,7 +36,7 @@ export const FFMPEG_LABELS: readonly Pair[] = [
  * （会连带三个 provider 的）类型图拉进来。
  */
 export const LYRIC_SOURCE_LABELS: readonly Pair[] = [
-  ['auto', '自动'], ['qq', 'QQ 音乐'], ['kugou', '酷狗音乐'], ['amll', 'AMLL'],
+  ['auto', '自动'], ['kugou', '酷狗音乐'], ['qq', 'QQ 音乐'], ['amll', 'AMLL'],
 ];
 
 /** [名称, 宽, 高] */

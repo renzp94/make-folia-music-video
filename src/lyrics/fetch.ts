@@ -10,6 +10,7 @@
 //   amll   TTML 逐字，社区维护，冷门中文歌可能没收录
 import type { Line, LyricData, SongResult } from './types.ts';
 import { calculateMatchScoreDetails } from './matchScore.ts';
+import { buildLyricSearchQuery } from './searchQuery.ts';
 import { searchQQLyrics, fetchQQLyrics } from './providers/qq.ts';
 import { searchKugouLyrics, fetchKugouLyrics } from './providers/kugou.ts';
 import { searchAmllDbSongs, fetchAmllDbLyrics } from './providers/amllDbProvider.ts';
@@ -22,8 +23,8 @@ export type FetchLyricsResult = {
   songName: string; artist: string; isWordByWord: boolean;
 };
 
-/** 默认顺序：QQ 命中率最高，酷狗次之（和 EchoMusic 同源），AMLL 兜底。 */
-const DEFAULT_SOURCES: LyricSourceId[] = ['qq', 'kugou', 'amll'];
+/** 默认顺序：酷狗 → QQ → AMLL（人工指定，不按命中率；顺序和 TUI 的「歌词源」一致）。 */
+const DEFAULT_SOURCES: LyricSourceId[] = ['kugou', 'qq', 'amll'];
 
 /**
  * 从「歌手 - 歌名」这类文件名里拆出歌手与歌名。
@@ -66,8 +67,11 @@ export async function fetchLyrics(
 
   for (const source of sources) {
     try {
-      log(`  在 ${source} 搜索「${query.artist ? `${query.artist} - ` : ''}${query.title}」…`);
-      const keyword = query.artist ? `${query.artist} - ${query.title}` : query.title;
+      // 关键词必须是「歌名 - 歌手」，第一段是歌名 —— 上游 provider 都按这个约定解析
+      // （searchQuery.buildKugouLyricSearchQuery 就取第一段当歌名）。反着传（「歌手 - 歌名」）
+      // 酷狗会把歌手名当歌名去搜，返回该歌手的热歌列表，于是"命中最像"的永远是别的歌。
+      const keyword = buildLyricSearchQuery(query.title, query.artist);
+      log(`  在 ${source} 搜索「${keyword}」…`);
 
       let data: LyricData | null = null;
       let picked: { name: string; artist: string } | null = null;

@@ -13,7 +13,7 @@ import {
 } from './render.ts';
 import { parseLrc, type Line } from './lrc.ts';
 import { fetchLyrics, parseTrackName, type LyricSourceId } from './lyrics/fetch.ts';
-import { loadConfig, saveConfig, type LyricSourceChoice } from './config.ts';
+import { loadConfig, saveConfig, type LyricChoiceValue } from './config.ts';
 import { basename, extname, join, resolve, dirname } from 'node:path';
 
 const AUDIO_EXT = new Set(['.mp3', '.flac', '.wav', '.m4a', '.aac', '.ogg', '.opus']);
@@ -82,6 +82,18 @@ export const guessLrc = (audio: string): string | null => {
   const norm = (s: string) => s.replace(/[\s　]/g, '').toLowerCase();
   const stem = norm(basename(audio, extname(audio)));
   return listFiles(dir, LRC_EXT).map((n) => join(dir, n)).find((p) => norm(basename(p, '.lrc')) === stem) ?? null;
+};
+
+/**
+ * 按**显示宽度**补空格再拼取值列。
+ *
+ * 不能用 `padEnd`：它按码元计数，而中文字符占两列 ——「音频」和「背景效果」补到同样
+ * 长度后，右边那一列就歪了。中日韩字符算 2 列，其余算 1 列（这里只会出现中文、拉丁、
+ * 空格和 ⌕，够了）。
+ */
+const padDisplay = (s: string, width: number): string => {
+  const w = [...s].reduce((n, ch) => n + (ch.charCodeAt(0) > 0x2e80 ? 2 : 1), 0);
+  return s + ' '.repeat(Math.max(0, width - w));
 };
 
 /** 一个居中的方框，用来做启动确认和异常提示 —— 需要用户明确表态，不能默默替它决定。 */
@@ -172,14 +184,42 @@ const List: React.FC<{
   </Box>
 );
 
-type View = 'main' | 'pickAudio' | 'pickLrc' | 'mode' | 'background' | 'intensity' | 'quality' | 'source' | 'settings';
+type View = 'main' | 'pickAudio' | 'pickLrc' | 'mode' | 'background' | 'intensity' | 'quality' | 'settings';
+
+/**
+ * 「歌词」一行的取值 —— 联网和本地合成同一个序列，没有隐式优先级，选哪个就是哪个。
+ *
+ *   auto    联网：按 酷狗 → QQ → AMLL 依次试
+ *   source  联网：只用指定的那一个源
+ *   file    本地：显式选过的某一份 .lrc
+ *   local   本地：与音频同名的 .lrc（兜底项；没有配置文件时也是默认值）
+ */
+type LyricChoice =
+  | { kind: 'auto' }
+  | { kind: 'source'; source: LyricSourceId }
+  | { kind: 'file'; path: string }
+  | { kind: 'local' };
 
 type State = {
-  audio: string | null; lrc: string | null;
-  /** true = 歌词走联网获取（与 `lrc === null` 搭配）；false = 用文件或自动配对同名 .lrc。 */
-  autoLrc: boolean;
+  audio: string | null;
   mode: string; background: string; intensity: string; quality: string;
 };
+
+/** ←→ 在「歌词」这一行能循环到的取值 —— 联网四项在前，「本地（兜底）」压尾。 */
+const LYRIC_CYCLE: readonly LyricChoice[] = [
+  { kind: 'auto' },
+  { kind: 'source', source: 'kugou' },
+  { kind: 'source', source: 'qq' },
+  { kind: 'source', source: 'amll' },
+  { kind: 'local' },
+];
+
+/** 取值的稳定标识 —— 既当列表项的 key，也用来判断「这一项是不是当前值」。 */
+const lyricChoiceKey = (c: LyricChoice): string =>
+  c.kind === 'source' ? `src:${c.source}` : c.kind === 'file' ? `file:${c.path}` : c.kind;
+
+/** ffmpeg 那一行 ←→ 能循环到的取值，与设置页里的选项同序。 */
+const FFMPEG_CYCLE: readonly FfmpegPreference[] = ['auto', 'system', 'embedded'];
 
 /** 主菜单里能用 ←→ 直接循环切换取值的字段（音频/歌词不在内，那两个必须走文件选择）。 */
 type SwitchField = 'mode' | 'background' | 'intensity' | 'quality';
@@ -193,15 +233,20 @@ const SWITCH_FIELDS: Record<SwitchField, readonly Pair[]> = {
 const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = ({ startDir, onDone }) => {
   const { exit } = useApp();
   const [state, setState] = useState({
-    audio: null as string | null, lrc: null as string | null, autoLrc: false, mode: 'classic',
+    audio: null as string | null, mode: 'classic',
     background: 'latent', intensity: 'normal', quality: '1080p',
   });
   const [view, setView] = useState<View>('main');
   const [cursor, setCursor] = useState(0);
   const [dir, setDir] = useState(resolve(startDir));
   const [error, setError] = useState('');
-  // 联网取词用哪个源。和 ffmpeg 偏好一样从配置里读 —— 选了就记住，下次不用再选。
-  const [lyricSource, setLyricSource] = useState<LyricSourceChoice>(() => loadConfig().lyricSource ?? 'auto');
+  // 歌词来源（联网 / 本地）也记在配置里。没记过就落在「本地（兜底）」——
+  // 也就是老行为：手边有同名 .lrc 就直接用，不发网络请求。
+  const [lyric, setLyric] = useState<LyricChoice>(() => {
+    const saved = loadConfig().lyricChoice;
+    if (saved === undefined || saved === 'local') return { kind: 'local' };
+    return saved === 'auto' ? { kind: 'auto' } : { kind: 'source', source: saved };
+  });
 
   // useInput 的回调只在渲染时刷新，而 React 会把同一批事件里的多次 setState 合并成一次
   // 渲染 —— 回调里读 state/cursor 会拿到合并前的旧值（按 ↓↓ 再回车，进的是第一项而不是
@@ -232,17 +277,24 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
   // 退出要二次确认 —— 一次手滑按到 q，刚选好的一整套参数就白填了
   const [confirmExit, setConfirmExit] = useState(false);
 
-  const live = useRef({ state, view, cursor, ffmpegPref, lyricSource });
-  live.current = { state, view, cursor, ffmpegPref, lyricSource };
+  const live = useRef({ state, view, cursor, ffmpegPref, lyric });
+  live.current = { state, view, cursor, ffmpegPref, lyric };
 
   const [run, setRun] = useState<RunState | null>(null);
   const [startedAt, setStartedAt] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
 
-  /** 设置页选的歌词源；`auto` 交给 fetchLyrics 用它自己的默认顺序（qq → kugou → amll）。 */
+  /** 只用了某一个源时把它传给取词；`auto`（以及本地两项）交给 fetchLyrics 用默认顺序（kugou → qq → amll）。 */
   const sourceOverride = (): LyricSourceId[] | undefined => {
-    const c = live.current.lyricSource;
-    return c === 'auto' ? undefined : [c];
+    const c = live.current.lyric;
+    return c.kind === 'source' ? [c.source] : undefined;
+  };
+
+  /** 选完就记住：联网项存 auto / 具体源，本地两项（含显式选中的文件）都存 `local`。 */
+  const persistLyric = (c: LyricChoice) => {
+    const value: LyricChoiceValue =
+      c.kind === 'auto' ? 'auto' : c.kind === 'source' ? c.source : 'local';
+    saveConfig({ lyricChoice: value });
   };
 
   /** 读并解析一份 .lrc；失败时 setError 并返回 null。 */
@@ -273,12 +325,20 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
     if (!s.audio) { setError('还没有选择音频文件'); return; }
     const pref = prefOverride ?? live.current.ffmpegPref ?? 'auto';
 
-    // ── 歌词来源：显式选的文件 > 联网自动获取 > 同名 .lrc ─────────────────────
+    // ── 歌词来源：就是「歌词」那一行选中的那一个，没有隐式优先级 ───────────────
+    const L = live.current.lyric;
     let lines: Line[] | null = null;
     let lyricNote = '';                     // 联网取到的话记下来源，完成后显示
-    if (s.lrc) {
-      lines = readLrcFile(s.lrc);
-    } else if (s.autoLrc) {
+    if (L.kind === 'file') {
+      lines = readLrcFile(L.path);
+    } else if (L.kind === 'local') {
+      const paired = guessLrc(s.audio);
+      if (!paired) {
+        setError(`本地没有和「${basename(s.audio)}」同名的 .lrc。可以在这份列表里挑一个，或把「歌词」切成「⌕ 自动获取（联网搜索）」。`);
+        return;
+      }
+      lines = readLrcFile(paired);
+    } else {
       const fetchAc = new AbortController();
       abortRef.current = fetchAc;
       setError('');
@@ -303,16 +363,12 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
       }
       if (!found) {
         setRun(null);
-        setError(`没找到「${title}」的歌词。可以自己选一份 .lrc，或在设置里换个歌词源再试。`);
+        setError(`没找到「${title}」的歌词。可以把「歌词」换成一个具体的源，或改成「本地（兜底）」。`);
         return;
       }
       // fetch.ts 的 toRenderLines 运行时已补上 text，只是类型声明是上游那份没有 text 的 Line
       lines = found.lines as Line[];
       lyricNote = `${found.source}（${found.songName} - ${found.artist}，${found.isWordByWord ? '逐字' : '仅行级'}）`;
-    } else {
-      const paired = guessLrc(s.audio);
-      if (!paired) { setError('还没有选择歌词文件（也没找到同名 .lrc）'); return; }
-      lines = readLrcFile(paired);
     }
     if (!lines) return;                     // readLrcFile 已经 setError 了
 
@@ -364,48 +420,64 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
     }).finally(() => { abortRef.current = null; });
   };
 
-  const pairedLrc = state.audio && !state.lrc && !state.autoLrc ? guessLrc(state.audio) : null;
-  // 主菜单上「歌词文件」那一行的取值：三种状态各说各的
-  const lrcValue = state.lrc ? basename(state.lrc)
-    : state.autoLrc ? '⌕ 自动获取（联网搜索）'
-      : pairedLrc ? `自动配对 ${basename(pairedLrc)}` : '(未选择)';
+  /** 「歌词」那一行右侧显示什么 —— 本地项要把「会用到哪份文件」直接写出来。 */
+  const lyricValue = (c: LyricChoice): string => {
+    if (c.kind === 'auto') return '⌕ 自动获取（联网搜索）';
+    if (c.kind === 'source') return `⌕ 联网 · ${labelOf(LYRIC_SOURCE_LABELS, c.source)}`;
+    if (c.kind === 'file') return `本地 · ${basename(c.path)}`;
+    const paired = state.audio ? guessLrc(state.audio) : null;
+    return paired ? `本地 · 自动配对 ${basename(paired)}` : '本地（没有同名 .lrc）';
+  };
 
   // group 只写在每组第一项上，渲染时插一行小标题
   const menu = [
-    { key: 'audio', group: '输入', label: '音频文件', value: state.audio ? basename(state.audio) : '(未选择)', to: 'pickAudio' as View },
-    { key: 'lrc', label: '歌词文件', value: lrcValue, to: 'pickLrc' as View },
-    { key: 'source', label: '歌词源', value: labelOf(LYRIC_SOURCE_LABELS, lyricSource), to: 'source' as View },
+    { key: 'audio', group: '输入', label: '音频', value: state.audio ? basename(state.audio) : '(未选择)', to: 'pickAudio' as View },
+    { key: 'lyric', label: '歌词', value: lyricValue(lyric), to: 'pickLrc' as View },
     { key: 'mode', group: '效果', label: '视觉效果', value: `${labelOf(MODE_LABELS, state.mode)} (${state.mode})`, to: 'mode' as View },
     { key: 'background', label: '背景效果', value: labelOf(BACKGROUND_LABELS, state.background), to: 'background' as View },
     { key: 'intensity', label: '动画强度', value: labelOf(INTENSITY_LABELS, state.intensity), to: 'intensity' as View },
     { key: 'quality', group: '输出', label: '清晰度', value: state.quality, to: 'quality' as View },
-    { key: 'settings', group: '其他', label: '设置', value: ffmpegPref ? labelOf(FFMPEG_LABELS, ffmpegPref) : '待选择', to: 'settings' as View },
+    { key: 'settings', group: '其他', label: 'ffmpeg', value: ffmpegPref ? labelOf(FFMPEG_LABELS, ffmpegPref) : '待选择', to: 'settings' as View },
     { key: 'run', label: '', value: '', to: 'main' as View },
   ];
 
   const options = (v: View): Option[] => {
     switch (v) {
-      case 'pickAudio':
-      case 'pickLrc': {
-        const { dirs, files } = listDir(dir, v === 'pickAudio' ? AUDIO_EXT : LRC_EXT);
+      case 'pickAudio': {
+        const { dirs, files } = listDir(dir, AUDIO_EXT);
         const parent = dirname(dir);
-        const chosen = v === 'pickAudio' ? live.current.state.audio : live.current.state.lrc;
+        const chosen = live.current.state.audio;
         return [
-          // 「自动获取」排在目录导航之前：它是这一屏最常用的落点，不该被埋在文件堆下面
-          ...(v === 'pickLrc' ? [{ key: 'auto', label: '⌕ 自动获取（联网搜索）', color: 'green', current: live.current.state.autoLrc }] : []),
           ...(parent !== dir ? [{ key: '..', label: '..（上级目录）', color: 'gray' }] : []),
           ...dirs.map((n) => ({ key: `dir:${n}`, label: `${n}/`, color: 'blue' })),
           ...files.map((n) => ({ key: join(dir, n), label: n, current: join(dir, n) === chosen })),
+        ];
+      }
+      case 'pickLrc': {
+        const { dirs, files } = listDir(dir, LRC_EXT);
+        const parent = dirname(dir);
+        const cur = lyricChoiceKey(live.current.lyric);
+        return [
+          // 联网（自动 / 指定某个源）在前 —— ←→ 也是在同一个序列里循环；本地兜底压尾，
+          // 再往下才是目录导航与具体的 .lrc（选一个就等于显式指定那份文件）。
+          ...LYRIC_CYCLE.map((c) => ({
+            key: lyricChoiceKey(c),
+            label: c.kind === 'local' ? '本地（兜底：用与音频同名的 .lrc）' : lyricValue(c),
+            color: 'green',
+            current: lyricChoiceKey(c) === cur,
+          })),
+          ...(parent !== dir ? [{ key: '..', label: '..（上级目录）', color: 'gray' }] : []),
+          ...dirs.map((n) => ({ key: `dir:${n}`, label: `${n}/`, color: 'blue' })),
+          ...files.map((n) => ({
+            key: join(dir, n), label: n,
+            current: live.current.lyric.kind === 'file' && live.current.lyric.path === join(dir, n),
+          })),
         ];
       }
       case 'mode': return MODE_LABELS.map(([k, l]) => ({ key: k, label: `${l} (${k})`, current: k === live.current.state.mode }));
       case 'background': return BACKGROUND_LABELS.map(([k, l]) => ({ key: k, label: `${l} (${k})`, current: k === live.current.state.background }));
       case 'intensity': return INTENSITY_LABELS.map(([k, l]) => ({ key: k, label: `${l} (${k})`, current: k === live.current.state.intensity }));
       case 'quality': return QUALITIES.map(([k, w, h]) => ({ key: k, label: `${k}  ${w}×${h}`, current: k === live.current.state.quality }));
-      case 'source': return LYRIC_SOURCE_LABELS.map(([k, l]) => ({
-        key: k, label: k === 'auto' ? `${l}（依次试 QQ → 酷狗 → AMLL）` : l,
-        current: k === live.current.lyricSource,
-      }));
       case 'settings': return [
         { key: 'auto', label: `自动（有电脑上的就用它）`, current: ffmpegPref === 'auto' },
         { key: 'system', label: `用电脑上的${sysFfmpeg ? `  ${sysFfmpeg}` : '（未检测到）'}`, current: ffmpegPref === 'system' },
@@ -416,11 +488,11 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
   };
 
   const items: Option[] = view === 'main'
-    ? menu.map((m) => ({ key: m.key, label: `${m.label.padEnd(10)} ${m.value}` }))
+    ? menu.map((m) => ({ key: m.key, label: `${padDisplay(m.label, 10)} ${m.value}` }))
     : options(view);
 
   const enter = () => {
-    const { state: s, view: v, cursor: c } = live.current;
+    const { view: v, cursor: c } = live.current;
 
     if (v === 'main') {
       const target = menu[c].to;
@@ -440,14 +512,16 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
     // 目录项只换目录、留在选择视图里，不当作「选中了一个文件」
     if (picked.key === '..') { setDir(dirname(dir)); setCursor(0); return; }
     if (picked.key.startsWith('dir:')) { setDir(join(dir, picked.key.slice(4))); setCursor(0); return; }
-    // 「自动获取」不是文件：清掉 lrc 路径、打开联网标记（同名 .lrc 的自动配对就此让位）
-    if (v === 'pickLrc' && picked.key === 'auto') {
-      setState((s) => ({ ...s, lrc: null, autoLrc: true }));
+    // 「歌词」：联网项 / 本地兜底项用固定的 key，其余一律当作具体的 .lrc 路径
+    if (v === 'pickLrc') {
+      const choice = LYRIC_CYCLE.find((x) => lyricChoiceKey(x) === picked.key);
+      if (choice) { setLyric(choice); persistLyric(choice); }
+      else setLyric({ kind: 'file', path: picked.key });
       setView('main');
       setCursor(0);
       return;
     }
-    // 设置页 / 歌词源的值不落在 state 里（各有自己的 state），单独处理、不进下面的 patch 表
+    // ffmpeg 偏好不落在 state 里（它有自己的一份），单独处理、不进下面的 patch 表
     if (v === 'settings') {
       const choice = picked.key as FfmpegPreference;
       setFfmpegPref(choice);
@@ -456,17 +530,8 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
       setCursor(0);
       return;
     }
-    if (v === 'source') {
-      const choice = picked.key as LyricSourceChoice;
-      setLyricSource(choice);
-      saveConfig({ lyricSource: choice });     // 同样记住
-      setView('main');
-      setCursor(0);
-      return;
-    }
     const patch: Partial<typeof state> = {
-      // 选了具体文件就把「自动获取」关掉 —— 否则下一次渲染仍会去联网
-      pickAudio: { audio: picked.key }, pickLrc: { lrc: picked.key, autoLrc: false },
+      pickAudio: { audio: picked.key },
       mode: { mode: picked.key }, background: { background: picked.key },
       intensity: { intensity: picked.key }, quality: { quality: picked.key },
     }[v] as Partial<typeof state>;
@@ -481,7 +546,7 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
     // 退出确认盖在所有界面之上 —— 它是「你要退出吗」那一问，不该被任何弹窗挡在后面。
     // Ctrl-C 也算反悔：否则它就成了绕过二次确认的后门。
     if (confirmExit) {
-      if (key.return || input === 'y') { exit(); onDone(null); return; }
+      if (key.return || input === 'y' || input === 'q') { exit(); onDone(null); return; }
       setConfirmExit(false);
       return;
     }
@@ -517,7 +582,8 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
       return;
     }
     if (key.ctrl && input === 'c') { setConfirmExit(true); return; }
-    if (v === 'main' && input === 'q') { setConfirmExit(true); return; }
+    // q 在任何界面都先弹二次确认 —— 不必先退回主菜单
+    if (input === 'q') { setConfirmExit(true); return; }
     if (key.escape) { setView('main'); setCursor(0); setError(''); return; }
     // s 是进入设置页的快捷方式，和主菜单 Enter 走同一个落点（定位到当前选择）
     if (v === 'main' && input === 's') {
@@ -526,16 +592,38 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
       setError('');
       return;
     }
-    // 主菜单里的「视觉效果 / 背景 / 动画强度 / 清晰度」用 ←→ 直接循环切换取值，
-    // 不必进子列表（音频/歌词两项除外 —— 那些必须走文件选择）。
+    // 主菜单里的「视觉效果 / 背景 / 动画强度 / 清晰度 / 歌词 / ffmpeg」用 ←→ 直接循环
+    // 切换取值，不必进子列表（「音频」除外 —— 那个只能在目录里挑文件）。
     if (v === 'main' && (key.leftArrow || key.rightArrow)) {
-      const field = SWITCH_FIELDS[menu[c].key as SwitchField];
+      const step = key.rightArrow ? 1 : -1;
+      const pick = <T,>(list: readonly T[], i: number): T =>
+        list[((i + step) % list.length + list.length) % list.length];
+      const row = menu[c].key;
+
+      if (row === 'lyric') {
+        const cur = lyricChoiceKey(live.current.lyric);
+        const next = pick(LYRIC_CYCLE, LYRIC_CYCLE.findIndex((x) => lyricChoiceKey(x) === cur));
+        setLyric(next);
+        persistLyric(next);
+        setError('');
+        return;
+      }
+      if (row === 'settings') {
+        // 机器上没装 ffmpeg 就不把「用电脑上的」放进循环 —— 选中它必然失败
+        const list = sysFfmpeg ? FFMPEG_CYCLE : FFMPEG_CYCLE.filter((p) => p !== 'system');
+        const cur = live.current.ffmpegPref;
+        const next = pick(list, cur ? list.indexOf(cur) : 0);
+        setFfmpegPref(next);
+        saveConfig({ ffmpeg: next });
+        setError('');
+        return;
+      }
+
+      const field = SWITCH_FIELDS[row as SwitchField];
       if (field) {
-        const cur = String(live.current.state[menu[c].key as SwitchField]);
-        const i = field.findIndex(([k]) => k === cur);
-        const n = field.length;
-        const next = field[((i + (key.rightArrow ? 1 : -1)) % n + n) % n][0];
-        setState((prev) => ({ ...prev, [menu[c].key]: next }) as State);
+        const cur = String(live.current.state[row as SwitchField]);
+        const next = pick(field, field.findIndex(([k]) => k === cur))[0];
+        setState((prev) => ({ ...prev, [row]: next }) as State);
         setError('');
       }
       return;
@@ -552,7 +640,7 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
   // ── 退出确认：盖在所有界面之上，包括 ffmpeg 弹窗 ────────────────────────────
   if (confirmExit) {
     return (
-      <Dialog title="确认退出" hint="Enter 或 y 退出   Esc 取消">
+      <Dialog title="确认退出" hint="Enter / y / q 退出   Esc 取消">
         <Text>确定要退出吗？</Text>
       </Dialog>
     );
@@ -621,7 +709,7 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
   const hint = run?.running
     ? (run.label === '获取歌词' ? 'Enter / s / Ctrl-C 取消取词' : 'Enter / s / Ctrl-C 停止渲染')
     : view === 'main'
-      ? '↑↓/jk 选择   ←→ 切换   Enter 确认   s 设置   q 退出'
+      ? '↑↓/jk 选择   ←→ 切换   Enter 确认   s ffmpeg   q 退出'
       : '↑↓/jk 选择   Enter 确认   Esc 返回';
 
   return (
@@ -659,15 +747,15 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
                   {m.group ? <Text dimColor>{m.group}</Text> : null}
                   <Text inverse={active}>
                     {active ? '❯ ' : '  '}
-                    <Text bold={active}>{m.label.padEnd(10)}</Text>
+                    <Text bold={active}>{padDisplay(m.label, 10)}</Text>
                     <Text color={active ? undefined : unset ? 'gray' : 'green'}>{m.value}</Text>
                   </Text>
                 </Box>
               );
             })
             : <List
-                title={view === 'source' ? '歌词源' : dir}
-                hint={view === 'source' ? '只影响「自动获取」；选过就记住' : ''}
+                title={view === 'settings' ? 'ffmpeg' : dir}
+                hint={view === 'pickLrc' ? '联网在前、本地兜底；选过就记住' : ''}
                 items={items} cursor={cursor} empty="(此目录没有可选文件)"
               />}
         </Box>

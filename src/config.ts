@@ -7,14 +7,20 @@ import type { LyricSourceId } from './lyrics/fetch.ts';
 
 export type FfmpegChoice = 'auto' | 'system' | 'embedded';
 
-/** 联网取词用哪个源。`auto` = 按 fetch.ts 的默认顺序 qq → kugou → amll 依次试。 */
-export type LyricSourceChoice = 'auto' | LyricSourceId;
+/** 「歌词」那一行能记住的取值：联网（自动 / 某个源）或本地兜底。 */
+export type LyricChoiceValue = 'auto' | LyricSourceId | 'local';
 
 export interface Config {
   /** 用哪一份 ffmpeg。写在这里之后启动就不再问了。 */
   ffmpeg?: FfmpegChoice;
-  /** 联网取词用哪个歌词源。不写就是 `auto`。 */
-  lyricSource?: LyricSourceChoice;
+  /**
+   * 「歌词」那一行选中的来源。不写就是 `local` —— 用与音频同名的 .lrc 兜底。
+   *
+   * 老版本这里是 `lyricSource`，含义是「联网时优先哪个源」，而默认仍然是本地配对。
+   * 两者语义不同（老键不等于「一启动就联网」），所以**故意不迁移**：把老值直接当新值用，
+   * 会让「本地兜底」静默变成「只用某一个源联网」。
+   */
+  lyricChoice?: LyricChoiceValue;
 }
 
 export const CONFIG_PATH = join(homedir(), '.config', 'folia-video', 'config.json');
