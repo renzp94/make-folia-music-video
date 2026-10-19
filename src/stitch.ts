@@ -3,6 +3,34 @@ import { launchChrome, connectCdp, killChrome, type CdpClient } from './cdp.ts';
 import { mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { join, extname } from 'node:path';
 
+/**
+ * 逐帧各阶段耗时统计。设 `FOLIA_PROFILE=1` 启用，每片跑完汇总一行。
+ *
+ * 为什么要它：19.7 fps（50ms/帧）的构成一直没人量过 —— 截图编码、CDP 往返、
+ * 写盘各占多少，决定了该往哪儿优化。见 docs/RENDER-PIPELINE.md §七「第 0 步」。
+ *
+ * 关键指标不是各分项，而是 **wall（整帧时长）减去各分项之和** —— 那部分是
+ * 隐性等待（合成器节流之类），不属于任何一次我们自己发的调用。
+ */
+const PROFILE = process.env.FOLIA_PROFILE === '1';
+type ProfileAcc = {
+  wall: number; setLine: number; frame: number; capture: number; decode: number; write: number; frames: number;
+};
+const newProfileAcc = (): ProfileAcc =>
+  ({ wall: 0, setLine: 0, frame: 0, capture: 0, decode: 0, write: 0, frames: 0 });
+
+function reportProfile(acc: ProfileAcc, label: string): void {
+  const n = acc.frames || 1;
+  const sum = acc.setLine + acc.frame + acc.capture + acc.decode + acc.write;
+  const ms = (v: number) => (v / n).toFixed(1).padStart(5);
+  console.log(
+    `[profile ${label}] ${acc.frames} 帧，每帧均值(ms)：` +
+    `wall=${ms(acc.wall)} | setLine=${ms(acc.setLine)} frame=${ms(acc.frame)} ` +
+    `capture=${ms(acc.capture)} decode=${ms(acc.decode)} write=${ms(acc.write)} ` +
+    `| 分项和=${(sum / n).toFixed(1)} 未归属=${((acc.wall - sum) / n).toFixed(1)}`,
+  );
+}
+
 const DRIVER_SRC = `
 (() => {
   let now = 0; const cbs = new Map(); let id = 1;
@@ -46,7 +74,15 @@ export interface SpecFrame {
 
 /** renderRange 的参数。 */
 interface RenderRangeArgs {
-  siteUrl: string; framesDir: string; from: number; to: number; warmup?: number;
+  siteUrl: string;
+  /** 落盘模式的目标目录。与 onFrameData 二选一。 */
+  framesDir?: string;
+  /**
+   * 流式模式：每渲好一帧就回调（Buffer 是编码后的 jpg 字节）。
+   * 与 framesDir 二选一 —— 给了这个就不落盘。
+   */
+  onFrameData?: (data: Buffer) => Promise<void>;
+  from: number; to: number; warmup?: number;
   /** 外部取消信号（界面上的「停止渲染」）。 */ signal?: AbortSignal;
   /** 封面 data URL（莫奈等模式右侧的肖像图）。 */ cover?: string | null;
   fps: number; foliaLines: unknown; specFrames: SpecFrame[];
@@ -56,7 +92,7 @@ interface RenderRangeArgs {
 }
 
 /** 渲染 [from, to) 帧区间，直接写入 framesDir（文件名用全局序号）。 */
-async function renderRange({ siteUrl, framesDir, from, to, warmup = 0, fps, foliaLines, specFrames,
+async function renderRange({ siteUrl, framesDir, onFrameData, from, to, warmup = 0, fps, foliaLines, specFrames,
                              width, height, mode, background, theme, tunings, fmt, quality, onFrame,
                              signal, cover }: RenderRangeArgs): Promise<void> {
   const browser = await launchChrome({ width, height });
@@ -133,8 +169,11 @@ async function renderRange({ siteUrl, framesDir, from, to, warmup = 0, fps, foli
     // 再开始正式出帧。否则分片起点的时间跳跃会让动画停在未收敛的状态上。
     const start = Math.max(0, from - warmup);
     let sentLine = -2;
+    if (PROFILE) console.log(`[profile] 片 ${from}~${to} 起跑（预热 ${from - start} 帧）`);
+    const acc = PROFILE ? newProfileAcc() : null;
     for (let f = start; f < to; f++) {
       if (signal?.aborted) throw new Error('已取消');
+      const wall0 = acc ? performance.now() : 0;
       const writing = f >= from;
       const timeSec = f / fps;
       const b = specFrames[f];
@@ -142,10 +181,13 @@ async function renderRange({ siteUrl, framesDir, from, to, warmup = 0, fps, foli
       // tick 推的还是旧树，新行的 enter 动画要等下一次让出事件循环才开始。
       // 只在行真的变了的时候多这一次，其余帧保持单次往返。
       if (b.lineIndex !== sentLine) {
+        const t0 = acc ? performance.now() : 0;
         await evaluate(send, `globalThis.__setLine(${b.lineIndex}, ${timeSec})`);
+        if (acc) acc.setLine += performance.now() - t0;
         sentLine = b.lineIndex;
       }
       // 频段值直接内联，spectrum 用紧凑的逗号串（省掉 JSON 数组的括号开销）
+      const t1 = acc ? performance.now() : 0;
       await evaluate(send, `(() => {
         const { audio, t } = globalThis.__mount;
         t.set(${timeSec});
@@ -158,15 +200,28 @@ async function renderRange({ siteUrl, framesDir, from, to, warmup = 0, fps, foli
         globalThis.__frame.tick(${timeSec * 1000});
         return 1;
       })()`);
+      if (acc) acc.frame += performance.now() - t1;
       // 预热帧也要截图，只是不落盘：headless 下合成器只在截图时才推进，
       // 而 Framer Motion 的 opacity/transform 走合成层 —— 光 tick 不截图，
       // 动画状态会冻住，进写盘后要瞎上百帧才恢复（分片每片开头都中这一枪）。
+      const t2 = acc ? performance.now() : 0;
       const shot = await send('Page.captureScreenshot', shotOpts) as { data: string };
+      if (acc) { acc.capture += performance.now() - t2; acc.wall += performance.now() - wall0; acc.frames += 1; }
       if (!writing) continue;
-      writeFileSync(join(framesDir, `f${String(f).padStart(6, '0')}.${fmt === 'jpeg' ? 'jpg' : fmt}`),
-                    Buffer.from(shot.data, 'base64'));
+      const t3 = acc ? performance.now() : 0;
+      const bytes = Buffer.from(shot.data, 'base64');
+      if (acc) acc.decode += performance.now() - t3;
+      const t4 = acc ? performance.now() : 0;
+      if (onFrameData) {
+        // 流式：直接交给调用方（喂进 ffmpeg 的 stdin），中途不落盘
+        await onFrameData(bytes);
+      } else {
+        writeFileSync(join(framesDir!, `f${String(f).padStart(6, '0')}.${fmt === 'jpeg' ? 'jpg' : fmt}`), bytes);
+      }
+      if (acc) acc.write += performance.now() - t4;
       onFrame();
     }
+    if (acc) reportProfile(acc, `${from}~${to}`);
   } finally {
     cdp.close(); killChrome(browser);
   }
@@ -174,7 +229,12 @@ async function renderRange({ siteUrl, framesDir, from, to, warmup = 0, fps, foli
 
 /** renderFramesParallel 的参数。 */
 interface RenderFramesArgs {
-  siteUrl: string; framesDir: string; totalFrames: number; fps: number;
+  siteUrl: string;
+  /** 落盘模式的目标目录。与 onFrameData 二选一。 */
+  framesDir?: string;
+  /** 流式模式：每帧回调（**仅 workers<=1 时支持**，多片无法保证顺序）。 */
+  onFrameData?: (data: Buffer) => Promise<void>;
+  totalFrames: number; fps: number;
   foliaLines: unknown; specFrames: SpecFrame[];
   width?: number; height?: number; mode?: string; background?: string;
   theme?: unknown; tunings?: unknown; workers?: number; fmt?: string; quality?: number; warmup?: number;
@@ -188,12 +248,16 @@ interface RenderFramesArgs {
  * @returns {Promise<{framesDir:string, ext:string, count:number}>}
  */
 export async function renderFramesParallel({
-  siteUrl, framesDir, totalFrames, fps, foliaLines, specFrames,
+  siteUrl, framesDir, onFrameData, totalFrames, fps, foliaLines, specFrames,
   width = 1920, height = 1080, mode = 'classic', background = 'latent',
   theme, tunings, workers = 1, fmt = 'png', quality = 95, warmup = 180, onProgress = () => {},
   signal, cover,
-}: RenderFramesArgs): Promise<{ framesDir: string; ext: string; count: number }> {
-  mkdirSync(framesDir, { recursive: true });
+}: RenderFramesArgs): Promise<{ framesDir?: string; ext: string; count: number }> {
+  // 流式模式下没有目录可建；多片模式必须落盘（分片各自写文件，由 ffmpeg 按序号读）
+  if (!onFrameData && framesDir) mkdirSync(framesDir, { recursive: true });
+  if (onFrameData && workers > 1) {
+    throw new Error('流式管道只支持 workers<=1 —— 多片并行下帧的顺序无法保证');
+  }
   let done = 0;
   const bump = () => { done += 1; onProgress(done / totalFrames); };
 
@@ -220,7 +284,7 @@ export async function renderFramesParallel({
     if (signal?.aborted) { await Promise.allSettled([...running]); throw new Error('已取消'); }
     while (running.size < workers && ranges.length) {
       const [from, to] = ranges.shift()!;
-      const p = renderRange({ siteUrl, framesDir, from, to, warmup, fps, foliaLines, specFrames,
+      const p = renderRange({ siteUrl, framesDir, onFrameData, from, to, warmup, fps, foliaLines, specFrames,
                               width, height, mode, background, theme, tunings, fmt, quality, onFrame: bump, signal, cover })
         .finally(() => running.delete(p));
       running.add(p);
