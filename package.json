@@ -1,5 +1,5 @@
 {
-  "name": "folia-music-video",
+  "name": "make-folia-music-video",
   "private": true,
   "type": "module",
   "description": "把 EchoMusic 的 Folia 歌词页离线渲染成 MP4（不是录屏）",
@@ -15,8 +15,8 @@
   "scripts": {
     "start": "bun index.ts",
     "check": "bun check",
-    "build:app": "bun build index.ts --compile --minify --outfile=dist/folia-video",
-    "build:mac": "bun build index.ts --compile --minify --target=bun-darwin-arm64 --outfile=dist/folia-video-macos-arm64"
+    "build:app": "bun build index.ts --compile --minify --outfile=dist/make-folia-video",
+    "build:mac": "bun build index.ts --compile --minify --target=bun-darwin-arm64 --outfile=dist/make-folia-video-macos-arm64"
   },
   "devDependencies": {
     "@types/bun": "^1.4.3",

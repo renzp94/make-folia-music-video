@@ -99,7 +99,7 @@ macOS 版已经自包含（内嵌 bundle + ffmpeg）。Windows 版缺一份 **wi
 3. 在 `src/assets.ts` 里按平台条件 import —— **注意**：`with { type: 'file' }` 是静态导入，
    两个平台的二进制会**同时**被打进产物（体积 +43 MB × 2）。要避免的话得改成运行时
    从 `Bun.embeddedFiles` 按名字取，或者各平台分别构建。
-4. 加回 `build:win` 脚本：`--target=bun-windows-x64 --outfile=dist/folia-video-windows-x64.exe`
+4. 加回 `build:win` 脚本：`--target=bun-windows-x64 --outfile=dist/make-folia-video-windows-x64.exe`
 
 **坑**：现在 `EMBEDDED_FFMPEG` 是写死的 darwin 那份。在没有 Windows 二进制的情况下
 直接 `--target=bun-windows-x64` 会打出一个**内嵌着 macOS 二进制**的 Windows 程序，
@@ -122,7 +122,7 @@ macOS 版已经自包含（内嵌 bundle + ffmpeg）。Windows 版缺一份 **wi
 - **全项目迁到 TypeScript**，`bun run check`（bun 自带的类型检查）是改完代码的必跑项（bun 只转译不查类型，
   实测靠它抓到过 `c is not defined` 和丢失的类型定义）。
 - **site/ 内嵌进可执行文件**（`src/assets.ts` 用 `import ... with { type: 'file' }`），
-  `dist/folia-video` 是真正的单文件（78 MB），旁边不需要再带 `site/` 目录。
+  `dist/make-folia-video` 是真正的单文件（78 MB），旁边不需要再带 `site/` 目录。
 - **进度显示**：渲染阶段和 ffmpeg 合成阶段都显示「已用时 / 剩余」。
 
 - 换行时 `currentTime` 必须先于 `render` 设置（照 `echo-folia-plugin/index.js:1316-1360` 的 tick 顺序），

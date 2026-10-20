@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
-// folia-video —— 把 Folia 歌词页渲染成 mp4
+// make-folia-video —— 把 Folia 歌词页渲染成 mp4
 //
-//   folia-video <音频...> [选项]     有参数 → 直接渲染（多首可并行）
-//   folia-video                     无参数 → 进 TUI（界面里跑渲染）
+//   make-folia-video <音频...> [选项]     有参数 → 直接渲染（多首可并行）
+//   make-folia-video                     无参数 → 进 TUI（界面里跑渲染）
 import './src/prelude.ts';
 
 import {
@@ -309,11 +309,11 @@ export async function main(argv = Bun.argv.slice(2)): Promise<number> {
 }
 
 function printHelp(): void {
-  console.log(`folia-video —— 把 Folia 歌词页渲染成 mp4
+  console.log(`make-folia-video —— 把 Folia 歌词页渲染成 mp4
 
 用法
-  folia-video <音频> [歌词.lrc] [选项]
-  folia-video <音频1> <音频2> ... [--jobs 3] [选项]   多首并行（各自配同名 .lrc 或联网取词）
+  make-folia-video <音频> [歌词.lrc] [选项]
+  make-folia-video <音频1> <音频2> ... [--jobs 3] [选项]   多首并行（各自配同名 .lrc 或联网取词）
 
 选项
   --out <路径>        输出 mp4（默认与音频同名；只能用于单首）

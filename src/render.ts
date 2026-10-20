@@ -51,7 +51,7 @@ let materializing: Promise<string> | null = null;
  * `.part` 再原子改名 —— 中途失败不会留下一个看着像完整、实则截断的文件。
  */
 async function materializeEmbedded(onProgress?: ReleaseProgress): Promise<string> {
-  const dest = join(tmpdir(), `folia-video-ffmpeg-${process.platform}-${process.arch}`);
+  const dest = join(tmpdir(), `make-folia-video-ffmpeg-${process.platform}-${process.arch}`);
 
   // 已经释放过就直接用（判断依据同上：存在且非空）
   if (existsSync(dest) && statSync(dest).size > 0) {

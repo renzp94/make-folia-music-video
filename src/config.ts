@@ -25,16 +25,24 @@ export interface Config {
   jobs?: number;
 }
 
-export const CONFIG_PATH = join(homedir(), '.config', 'folia-video', 'config.json');
+export const CONFIG_PATH = join(homedir(), '.config', 'make-folia-video', 'config.json');
+
+/** 改名前的旧路径：读到就沿用，免得用户重选一遍 ffmpeg。 */
+const LEGACY_CONFIG_PATH = join(homedir(), '.config', 'folia-video', 'config.json');
 
 /** 读配置。文件不存在或坏了都当空配置 —— 配置读不出来不该拦住程序启动。 */
 export function loadConfig(): Config {
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'));
-    return parsed && typeof parsed === 'object' ? (parsed as Config) : {};
-  } catch {
-    return {};
+  for (const path of [CONFIG_PATH, LEGACY_CONFIG_PATH]) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+      if (parsed && typeof parsed === 'object') {
+        return parsed as Config;
+      }
+    } catch {
+      // 新路径没有就看旧路径；都没有就是空配置
+    }
   }
+  return {};
 }
 
 /** 合并写入。写失败只警告不抛 —— 最多是下次再问一遍。 */

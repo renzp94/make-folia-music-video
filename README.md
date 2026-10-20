@@ -1,4 +1,4 @@
-# folia-music-video
+# make-folia-music-video
 
 把 Folia 歌词页的视觉效果**离线渲染**成 MP4（一首歌一个文件）。**不是录屏** —— 逐帧驱动 headless Chrome，所以画质不受屏幕和录制软件限制。
 
@@ -25,7 +25,7 @@ bun index.ts                    # 无参数 → 进终端界面
 - **`本地（兜底：用与音频同名的 .lrc）`** —— 用同名 `.lrc`；这一项下面就是目录导航与具体的 `.lrc`，选一个等于显式指定那份文件。
 
 联网那几秒会在同一个进度面板里逐条显示搜索过程（`在 kugou 搜索「…」`），期间按 Enter / s / Ctrl-C 可以取消。
-选过的来源会记住（`~/.config/folia-video/config.json` 里的 `lyricChoice`），下次启动接着用。
+选过的来源会记住（`~/.config/make-folia-video/config.json` 里的 `lyricChoice`），下次启动接着用。
 
 ## 命令行
 
@@ -74,9 +74,9 @@ bun index.ts song.mp3 --offset -500
 ## 打成单文件可执行程序
 
 ```bash
-bun run build:app          # → dist/folia-video（约 122 MB，当前平台）
-bun run build:mac          # → dist/folia-video-macos-arm64（交叉编译，在 Mac 上出 macOS 版）
-./dist/folia-video
+bun run build:app          # → dist/make-folia-video（约 122 MB，当前平台）
+bun run build:mac          # → dist/make-folia-video-macos-arm64（交叉编译，在 Mac 上出 macOS 版）
+./dist/make-folia-video
 ```
 
 产物是**自包含**的，拷到别的机器上直接能跑，不用装任何东西：
