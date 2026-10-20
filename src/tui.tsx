@@ -14,6 +14,7 @@ import {
 import { parseLrc, type Line } from './lrc.ts';
 import { fetchLyrics, parseTrackName, type LyricSourceId } from './lyrics/fetch.ts';
 import { loadConfig, saveConfig, type LyricChoiceValue } from './config.ts';
+import { runPool } from './batch.ts';
 import { basename, extname, join, resolve, dirname } from 'node:path';
 
 const AUDIO_EXT = new Set(['.mp3', '.flac', '.wav', '.m4a', '.aac', '.ogg', '.opus']);
@@ -34,6 +35,15 @@ export type Job = {
   mode: string; background: string; intensity: string;
 };
 
+/** 多首渲染时，每首歌自己的一行进度。 */
+type JobProgress = {
+  name: string;
+  progress: number;       // 0..1
+  stage: string;          // 取词 / 渲染帧 / 合成 / 完成
+  done: boolean;
+  failed?: string;        // 失败原因
+};
+
 /** 渲染任务在界面里的实时状态。 */
 type RunState = {
   running: boolean;
@@ -42,6 +52,8 @@ type RunState = {
   label: string;          // 阶段名：准备中 / 渲染帧 / 合成
   detail: string;         // 具体信息（帧数 / 输出路径 / 错误）
   ok: boolean;            // 结束时是否成功
+  /** 多首时逐首显示；单首不传。 */
+  jobs?: JobProgress[];
 };
 
 type Option = {
@@ -96,6 +108,17 @@ const padDisplay = (s: string, width: number): string => {
   return s + ' '.repeat(Math.max(0, width - w));
 };
 
+/** 按显示宽度截断（超长歌名不把进度条挤出屏幕）。 */
+const clipDisplay = (s: string, width: number): string => {
+  let w = 0, out = '';
+  for (const ch of s) {
+    const cw = ch.charCodeAt(0) > 0x2e80 ? 2 : 1;
+    if (w + cw > width) { return `${out}…`; }
+    out += ch; w += cw;
+  }
+  return out;
+};
+
 /** 一个居中的方框，用来做启动确认和异常提示 —— 需要用户明确表态，不能默默替它决定。 */
 const Dialog: React.FC<{ title: string; children: React.ReactNode; hint: string }> =
   ({ title, children, hint }) => (
@@ -135,8 +158,67 @@ function abortable<T>(p: Promise<T>, signal: AbortSignal): Promise<T | typeof AB
 }
 
 /** 按钮下方的进度区：进度条 + 已用时 / 剩余 + 阶段信息。 */
-const RunPanel: React.FC<{ run: RunState; startedAt: number; width: number }> = ({ run, startedAt, width }) => {
-  const elapsed = (Date.now() - startedAt) / 1000;
+const RunPanel: React.FC<{ run: RunState; startedAt: number; width: number; cursor?: number }> =
+  ({ run, startedAt, width, cursor = 0 }) => {
+  // 进度回调是稀疏的（取词、合成阶段尤其），「已用时」不能跟着它们走；
+  // 自己每秒跳一下，保证计时实时。
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    setNow(Date.now());
+    if (!run.running) { return; }
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [run.running]);
+  const elapsed = (now - startedAt) / 1000;
+
+  // 多首：每首一行独立的进度条，失败/完成各有标记
+  if (run.jobs && run.jobs.length > 1) {
+    const doneCount = run.jobs.filter((j) => j.done && !j.failed).length;
+    const failCount = run.jobs.filter((j) => j.failed).length;
+    const barW = Math.max(12, Math.min(40, width - 28));
+    return (
+      <Box flexDirection="column" marginTop={1} paddingLeft={2}>
+        {run.jobs.map((j, i) => {
+          const pct = Math.round(j.progress * 100);
+          const tint = j.failed ? 'red' : j.done ? 'green' : 'yellow';
+          const filled = Math.round(barW * j.progress);
+          const bar = '█'.repeat(filled) + '░'.repeat(barW - filled);
+          const active = run.running && i === cursor;
+          return (
+            <Box key={`${j.name}-${i}`} flexDirection="column">
+              {/* 第一行：歌名。选中用行首箭头标出，不整行反色 */}
+              <Text>
+                <Text color={active ? 'cyan' : undefined}>{active ? '❯' : ' '}</Text>
+                {' '}
+                <Text color={tint}>{j.done ? (j.failed ? '✗' : '✓') : '▶'}</Text>
+                {' '}
+                <Text dimColor={!active} bold={active}>
+                  {clipDisplay(j.name, Math.max(10, width - (j.done ? 12 : 22)))}
+                </Text>
+                {/* 每首歌一个停止按钮；未选中是灰的，选中变红，Enter 触发 */}
+                {!j.done
+                  ? <Text color={active ? 'red' : 'gray'} bold={active}>  [停止]</Text>
+                  : null}
+              </Text>
+              {/* 第二行：进度条 + 百分比 + 阶段 */}
+              <Text>
+                {'      '}
+                <Text color={tint}>{bar}</Text>
+                <Text color={tint}>{` ${String(pct).padStart(3)}%`}</Text>
+                <Text dimColor>{`  ${j.failed ? clipDisplay(j.failed, 24) : j.done ? '完成' : j.stage}`}</Text>
+              </Text>
+            </Box>
+          );
+        })}
+        <Text dimColor>
+          {run.running
+            ? `已完成 ${doneCount}/${run.jobs.length}${failCount > 0 ? ` · 失败 ${failCount}` : ''}  已用时 ${fmtDur(elapsed)}`
+            : run.detail}
+        </Text>
+      </Box>
+    );
+  }
+
   // 进度太小时除以 p 会把剩余时间放大得离谱，先不显示
   const eta = run.running && run.progress > 0.02 ? (elapsed * (1 - run.progress)) / run.progress : null;
   const barW = Math.max(12, Math.min(40, width - 34));
@@ -201,7 +283,8 @@ type LyricChoice =
   | { kind: 'local' };
 
 type State = {
-  audio: string | null;
+  /** 选中的音频，按选择顺序。空数组 = 未选择；多首会并行渲染。 */
+  audios: string[];
   mode: string; background: string; intensity: string; quality: string;
 };
 
@@ -221,6 +304,9 @@ const lyricChoiceKey = (c: LyricChoice): string =>
 /** ffmpeg 那一行 ←→ 能循环到的取值，与设置页里的选项同序。 */
 const FFMPEG_CYCLE: readonly FfmpegPreference[] = ['auto', 'system', 'embedded'];
 
+/** 「并行」那一行 ←→ 能循环到的取值。 */
+const JOBS_CYCLE: readonly number[] = [2, 3, 4, 5, 6];
+
 /** 主菜单里能用 ←→ 直接循环切换取值的字段（音频/歌词不在内，那两个必须走文件选择）。 */
 type SwitchField = 'mode' | 'background' | 'intensity' | 'quality';
 const SWITCH_FIELDS: Record<SwitchField, readonly Pair[]> = {
@@ -233,7 +319,7 @@ const SWITCH_FIELDS: Record<SwitchField, readonly Pair[]> = {
 const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = ({ startDir, onDone }) => {
   const { exit } = useApp();
   const [state, setState] = useState({
-    audio: null as string | null, mode: 'classic',
+    audios: [] as string[], mode: 'classic',
     background: 'latent', intensity: 'normal', quality: '1080p',
   });
   const [view, setView] = useState<View>('main');
@@ -246,6 +332,11 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
     const saved = loadConfig().lyricChoice;
     if (saved === undefined || saved === 'local') return { kind: 'local' };
     return saved === 'auto' ? { kind: 'auto' } : { kind: 'source', source: saved };
+  });
+  // 同时渲染几首。旧配置或越界值都落回默认 3。
+  const [jobs, setJobs] = useState<number>(() => {
+    const saved = loadConfig().jobs;
+    return saved !== undefined && JOBS_CYCLE.includes(saved) ? saved : 3;
   });
 
   // useInput 的回调只在渲染时刷新，而 React 会把同一批事件里的多次 setState 合并成一次
@@ -277,12 +368,37 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
   // 退出要二次确认 —— 一次手滑按到 q，刚选好的一整套参数就白填了
   const [confirmExit, setConfirmExit] = useState(false);
 
-  const live = useRef({ state, view, cursor, ffmpegPref, lyric });
-  live.current = { state, view, cursor, ffmpegPref, lyric };
+  const live = useRef({ state, view, cursor, ffmpegPref, lyric, jobs });
+  live.current = { state, view, cursor, ffmpegPref, lyric, jobs };
 
   const [run, setRun] = useState<RunState | null>(null);
   const [startedAt, setStartedAt] = useState(0);
-  const abortRef = useRef<AbortController | null>(null);
+  /** 每首一个取消控制器：既能单独停，也能一次停全部。 */
+  const abortRef = useRef<AbortController[] | null>(null);
+  /** 多首渲染时，↑↓ 选中的任务下标（决定 Enter 停哪一首）。 */
+  const [jobCursor, setJobCursor] = useState(0);
+  /** 哪些任务是被用户主动停掉的（进度面板要立刻显示「已取消」）。 */
+  const canceledRef = useRef<boolean[]>([]);
+  /** 全部停止。 */
+  const stopAll = () => {
+    const list = abortRef.current;
+    if (!list) { return; }
+    list.forEach((a, i) => { a.abort(); canceledRef.current[i] = true; });
+    setRun((r) => (r?.jobs
+      ? { ...r, jobs: r.jobs.map((j) => (j.done ? j : { ...j, done: true, stage: '已取消', failed: '已取消' })) }
+      : r));
+  };
+  /** 只停某一首。 */
+  const stopJob = (i: number) => {
+    const a = abortRef.current?.[i];
+    if (!a) { return; }
+    a.abort();
+    canceledRef.current[i] = true;
+    setRun((r) => (r?.jobs
+      ? { ...r, jobs: r.jobs.map((j, idx) => (idx === i && !j.done
+        ? { ...j, done: true, stage: '已取消', failed: '已取消' } : j)) }
+      : r));
+  };
 
   /** 只用了某一个源时把它传给取词；`auto`（以及本地两项）交给 fetchLyrics 用默认顺序（kugou → qq → amll）。 */
   const sourceOverride = (): LyricSourceId[] | undefined => {
@@ -297,16 +413,47 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
     saveConfig({ lyricChoice: value });
   };
 
-  /** 读并解析一份 .lrc；失败时 setError 并返回 null。 */
-  const readLrcFile = (path: string): Line[] | null => {
-    try {
-      const parsed = parseLrc(readFileSync(path, 'utf8'), 0).lines;
-      if (parsed.length === 0) { setError(`歌词是空的：${path}`); return null; }
-      return parsed;
-    } catch (e) {
-      setError(`歌词读不出来：${(e as Error).message}`);
-      return null;
+  /** 读并解析一份 .lrc；失败直接抛，由调用方决定怎么展示（批量时要逐首汇总）。 */
+  const readLrc = (path: string): Line[] => {
+    const parsed = parseLrc(readFileSync(path, 'utf8'), 0).lines;
+    if (parsed.length === 0) { throw new Error(`歌词是空的：${path}`); }
+    return parsed;
+  };
+
+  /**
+   * 按「歌词」那一行的选择，给一首歌拿到歌词。
+   * 失败直接抛 —— 单首会把消息显示在错误行，多首会汇总到完成面板。
+   */
+  const resolveLines = async (
+    audio: string, pref: FfmpegPreference, tag = '',
+  ): Promise<{ lines: Line[]; note: string }> => {
+    const L = live.current.lyric;
+    if (L.kind === 'file') {
+      return { lines: readLrc(L.path), note: '' };
     }
+    if (L.kind === 'local') {
+      const paired = guessLrc(audio);
+      if (!paired) {
+        throw new Error(`本地没有和「${basename(audio)}」同名的 .lrc。可以在这份列表里挑一个，或把「歌词」切成「⌕ 自动获取（联网搜索）」。`);
+      }
+      return { lines: readLrc(paired), note: '' };
+    }
+    const { title, artist } = parseTrackName(basename(audio, extname(audio)));
+    // 真实时长必须传：打分对时长差 >10s 有十倍惩罚，传错会选中标题完全不对的歌
+    const durationSec = await probeDurationSec(audio, pref);
+    const found = await fetchLyrics({ title, artist, durationSec }, {
+      sources: sourceOverride(),
+      // 逐条打给用户看 —— 联网这几秒界面不能是一片空白
+      onLog: (m) => setRun((r) => (r ? { ...r, detail: `${tag}${m.trim()}` } : r)),
+    });
+    if (!found) {
+      throw new Error(`没找到「${title}」的歌词。可以把「歌词」换成一个具体的源，或改成「本地（兜底）」。`);
+    }
+    // fetch.ts 的 toRenderLines 运行时已补上 text，只是类型声明是上游那份没有 text 的 Line
+    return {
+      lines: found.lines as Line[],
+      note: `${found.source}（${found.songName} - ${found.artist}，${found.isWordByWord ? '逐字' : '仅行级'}）`,
+    };
   };
 
   /**
@@ -322,102 +469,167 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
    */
   const startRender = async (prefOverride?: FfmpegPreference) => {
     const s = live.current.state;
-    if (!s.audio) { setError('还没有选择音频文件'); return; }
+    const total = s.audios.length;
+    if (total === 0) { setError('还没有选择音频文件'); return; }
     const pref = prefOverride ?? live.current.ffmpegPref ?? 'auto';
-
-    // ── 歌词来源：就是「歌词」那一行选中的那一个，没有隐式优先级 ───────────────
-    const L = live.current.lyric;
-    let lines: Line[] | null = null;
-    let lyricNote = '';                     // 联网取到的话记下来源，完成后显示
-    if (L.kind === 'file') {
-      lines = readLrcFile(L.path);
-    } else if (L.kind === 'local') {
-      const paired = guessLrc(s.audio);
-      if (!paired) {
-        setError(`本地没有和「${basename(s.audio)}」同名的 .lrc。可以在这份列表里挑一个，或把「歌词」切成「⌕ 自动获取（联网搜索）」。`);
-        return;
-      }
-      lines = readLrcFile(paired);
-    } else {
-      const fetchAc = new AbortController();
-      abortRef.current = fetchAc;
-      setError('');
-      setStartedAt(Date.now());
-      setRun({ running: true, progress: 0, label: '获取歌词', detail: '', ok: false });
-
-      const { title, artist } = parseTrackName(basename(s.audio, extname(s.audio)));
-      // 真实时长必须传：打分对时长差 >10s 有十倍惩罚，传错会选中标题完全不对的歌
-      const durationSec = await probeDurationSec(s.audio, pref);
-      const found = await abortable(
-        fetchLyrics({ title, artist, durationSec }, {
-          sources: sourceOverride(),
-          // 逐条打给用户看 —— 联网这几秒界面不能是一片空白
-          onLog: (m) => { if (!fetchAc.signal.aborted) setRun((r) => (r ? { ...r, detail: m.trim() } : r)); },
-        }),
-        fetchAc.signal,
-      );
-      abortRef.current = null;
-      if (found === ABORTED) {
-        setRun({ running: false, progress: 0, ok: false, label: '已取消', detail: '' });
-        return;
-      }
-      if (!found) {
-        setRun(null);
-        setError(`没找到「${title}」的歌词。可以把「歌词」换成一个具体的源，或改成「本地（兜底）」。`);
-        return;
-      }
-      // fetch.ts 的 toRenderLines 运行时已补上 text，只是类型声明是上游那份没有 text 的 Line
-      lines = found.lines as Line[];
-      lyricNote = `${found.source}（${found.songName} - ${found.artist}，${found.isWordByWord ? '逐字' : '仅行级'}）`;
+    // 显式 .lrc 只能配一首 —— 多首的歌词本来就不可能共用
+    if (live.current.lyric.kind === 'file' && total > 1) {
+      setError('多首渲染时歌词请用「自动获取」或「本地同名配对」；具体的 .lrc 只能配单首。');
+      return;
     }
-    if (!lines) return;                     // readLrcFile 已经 setError 了
 
     const q = QUALITIES.find(([k]) => k === s.quality) ?? QUALITIES[1];
-    const output = join(dirname(s.audio), `${basename(s.audio, extname(s.audio))}.mp4`);
-    // 渲染另起一个 AbortController：取词那个可能已经 abort 过，沿用会让渲染一开始就被取消
-    const ac = new AbortController();
-    abortRef.current = ac;
+    // 每首一个控制器：Enter 只停选中的那首，a / Ctrl-C 全部停
+    const acs = s.audios.map(() => new AbortController());
+    abortRef.current = acs;
+    canceledRef.current = new Array<boolean>(total).fill(false);
+    setJobCursor(0);
     setError('');
-    setStartedAt(Date.now());
-    setRun({ running: true, progress: 0, label: '准备中', detail: '', ok: false });
 
-    renderToMp4({
-      audioPath: s.audio, lines, output,
-      ffmpeg: pref,
-      coverFrom: s.audio,
-      // 空路径必然 existsSync 失败，于是 serveStatic 落到内嵌的那份资源（见 src/assets.ts）
-      siteDir: '',
-      signal: ac.signal,
-      render: {
-        width: q[1], height: q[2], fps: 60, mode: s.mode, background: s.background,
-        theme: { animationIntensity: s.intensity },
-      },
-      onStage: (_stage, detail) => setRun((r) => r && { ...r, detail }),
-      // 释放内置 ffmpeg 时进度条复用同一个面板，标签写清楚是在干什么
-      onFfmpegProgress: (p) => setRun((r) => r && { ...r, progress: p, label: '释放内置 ffmpeg' }),
-      onProgress: (p) => setRun((r) => r && { ...r, progress: p, label: '渲染帧' }),
-      onEncodeProgress: (p) => setRun((r) => r && { ...r, progress: p, label: '合成' }),
-    }).then((res) => {
-      setRun({
-        running: false, progress: 1, label: '完成', ok: true,
-        detail: `${res.frames} 帧 / ${res.durationSec.toFixed(1)}s  →  ${res.output}`
-          // 联网取的歌词换行单独一行写清楚出处，别让它在长路径后面挤成一团
-          + (lyricNote ? `\n歌词 ${lyricNote}` : ''),
+    // 多首时每首占整体进度的一份；取词/渲染/合成在单首内部按 5%/85%/10% 分配。
+    // 单首保持原来的两段独立进度（渲染帧、合成各自从 0 到 1），行为不变。
+    const progress = new Array<number>(total).fill(0);
+    const stage = new Array<string>(total).fill('等待');
+    const finished = new Array<boolean>(total).fill(false);
+    const results = new Array<{ res: Awaited<ReturnType<typeof renderToMp4>>; note: string } | null>(total).fill(null);
+    const overall = () => progress.reduce((a, b) => a + b, 0) / total;
+    const jobsView = (): JobProgress[] => s.audios.map((a, i) => ({
+      name: basename(a, extname(a)),
+      progress: progress[i],
+      // 用户停掉的任务立即显示已取消，后面的 bump 也不能把它刷回去
+      stage: canceledRef.current[i] ? '已取消' : stage[i],
+      done: finished[i] || canceledRef.current[i],
+      failed: canceledRef.current[i] ? '已取消' : undefined,
+    }));
+
+    setStartedAt(Date.now());
+    setRun({ running: true, progress: 0, label: total > 1 ? `0/${total} 首` : '获取歌词',
+             detail: '', ok: false, jobs: total > 1 ? jobsView() : undefined });
+
+    // 每帧都可能更新进度；按 1% 或阶段变化节流，别让 ink 每帧重排整块
+    const shownPct = new Array<number>(total).fill(-1);
+    const shownStage = new Array<string>(total).fill('');
+    const bump = (i: number, _label: string) => {
+      const pct = Math.floor(progress[i] * 100);
+      if (pct === shownPct[i] && stage[i] === shownStage[i]) { return; }
+      shownPct[i] = pct; shownStage[i] = stage[i];
+      setRun((r) => {
+        if (!r) { return r; }
+        // 单首：进度由 onProgress / onEncodeProgress 直接驱动，这里只更新阶段文字
+        if (total === 1) { return { ...r, detail: stage[i] }; }
+        return {
+          ...r,
+          progress: overall(),
+          label: `${finished.filter(Boolean).length}/${total} 首`,
+          detail: '',
+          jobs: jobsView(),
+        };
       });
-    }).catch((e: unknown) => {
-      const aborted = ac.signal.aborted;
+    };
+
+    const settled = await runPool(s.audios, Math.min(live.current.jobs, total), async (audio, i) => {
+      const signal = acs[i].signal;
+      const tag = total > 1 ? `[${i + 1}/${total}] ` : '';
+      stage[i] = '获取歌词';
+      bump(i, '获取歌词');
+      const resolved = await abortable(resolveLines(audio, pref, tag), signal);
+      if (resolved === ABORTED) { throw new Error('已取消'); }
+      const { lines, note } = resolved;
+
+      stage[i] = '准备中';
+      bump(i, '准备中');
+      const output = join(dirname(audio), `${basename(audio, extname(audio))}.mp4`);
+      const res = await renderToMp4({
+        audioPath: audio, lines, output,
+        ffmpeg: pref,
+        coverFrom: audio,
+        // 空路径必然 existsSync 失败，于是 serveStatic 落到内嵌的那份资源（见 src/assets.ts）
+        siteDir: '',
+        signal,
+        render: {
+          width: q[1], height: q[2], fps: 60, mode: s.mode, background: s.background,
+          theme: { animationIntensity: s.intensity },
+        },
+        onStage: (_stage, detail) => { stage[i] = detail; bump(i, '渲染'); },
+        // 释放内置 ffmpeg 时进度条复用同一个面板，标签写清楚是在干什么
+        onFfmpegProgress: (p) => {
+          if (total === 1) { setRun((r) => r && { ...r, progress: Math.max(r.progress, p * 0.05), label: '释放内置 ffmpeg' }); }
+          else { progress[i] = Math.max(progress[i], p * 0.05); bump(i, '释放内置 ffmpeg'); }
+        },
+        onProgress: (p) => {
+          if (total === 1) { setRun((r) => r && { ...r, progress: Math.max(r.progress, p), label: '渲染帧' }); }
+          else { progress[i] = Math.max(progress[i], 0.05 + p * 0.95); bump(i, '渲染帧'); }
+        },
+        // 流式管道下渲染和 ffmpeg 编码是同时跑的，编码进度天然落后于渲染进度；
+        // 再用它推进度会让条子来回跳，所以进度只认渲染帧（渲染是瓶颈）。
+
+        onEncodeProgress: () => {},
+      });
+      progress[i] = 1; finished[i] = true; results[i] = { res, note };
+      bump(i, '完成');
+    });
+    abortRef.current = null;
+
+    // 全部被停止（「全部停止」）→ 和单首取消一样，不留「部分完成」的面板
+    if (acs.every((a) => a.signal.aborted)) {
+      setRun({ running: false, progress: 0, ok: false, label: '已取消', detail: '',
+               jobs: total > 1 ? jobsView() : undefined });
+      return;
+    }
+
+    const failures = settled
+      .map((r, i) => (r.status === 'rejected'
+        ? { audio: s.audios[i], index: i, reason: r.reason, canceled: acs[i].signal.aborted }
+        : null))
+      .filter((x): x is { audio: string; index: number; reason: unknown; canceled: boolean } => x !== null);
+    const failureNote = (f: { reason: unknown; canceled: boolean }): string =>
+      f.canceled ? '已取消' : f.reason instanceof Error ? f.reason.message : String(f.reason);
+    const failedByIndex = new Map(failures.map((f) => [f.index, failureNote(f)]));
+
+    // 用户选了系统那份 ffmpeg 却用不了 → 说明原因，问要不要改用内置的
+    const ffmpegFailure = failures.find((f) => f.reason instanceof FfmpegUnavailableError);
+    if (ffmpegFailure) {
       setRun(null);
-      // 用户选了系统那份 ffmpeg 却用不了 → 说明原因，问要不要改用内置的
-      if (!aborted && e instanceof FfmpegUnavailableError) {
-        setFfmpegFallback((e as Error).message);
+      setFfmpegFallback((ffmpegFailure.reason as Error).message);
+      return;
+    }
+
+    if (total === 1) {
+      const only = results[0];
+      if (!only) {
+        setRun({
+          running: false, progress: 0, ok: false, label: '失败',
+          detail: failures[0] ? failureNote(failures[0]) : '未知错误',
+        });
         return;
       }
       setRun({
-        running: false, progress: 0, ok: false,
-        label: aborted ? '已取消' : '失败',
-        detail: aborted ? '' : String((e as Error)?.message ?? e),
+        running: false, progress: 1, label: '完成', ok: true,
+        detail: `${only.res.frames} 帧 / ${only.res.durationSec.toFixed(1)}s  →  ${only.res.output}`
+          // 联网取的歌词换行单独一行写清楚出处，别让它在长路径后面挤成一团
+          + (only.note ? `\n歌词 ${only.note}` : ''),
       });
-    }).finally(() => { abortRef.current = null; });
+      return;
+    }
+
+    const finalJobs: JobProgress[] = s.audios.map((a, i) => {
+      const note = failedByIndex.get(i);
+      return {
+        name: basename(a, extname(a)),
+        progress: finished[i] ? 1 : progress[i],
+        stage: finished[i] ? '完成' : (note ?? '失败'),
+        done: true,
+        failed: note,
+      };
+    });
+    setRun({
+      running: false, progress: 1,
+      label: failures.length > 0 ? '部分完成' : '完成',
+      ok: failures.length === 0,
+      detail: `成功 ${total - failures.length} 首，失败 ${failures.length} 首`
+        + failures.map((f) => `\n${basename(f.audio)}：${failureNote(f)}`).join(''),
+      jobs: finalJobs,
+    });
   };
 
   /** 「歌词」那一行右侧显示什么 —— 本地项要把「会用到哪份文件」直接写出来。 */
@@ -425,18 +637,25 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
     if (c.kind === 'auto') return '⌕ 自动获取（联网搜索）';
     if (c.kind === 'source') return `⌕ 联网 · ${labelOf(LYRIC_SOURCE_LABELS, c.source)}`;
     if (c.kind === 'file') return `本地 · ${basename(c.path)}`;
-    const paired = state.audio ? guessLrc(state.audio) : null;
+    if (state.audios.length > 1) return '本地 · 每首自动配对同名 .lrc';
+    const paired = state.audios.length === 1 ? guessLrc(state.audios[0]) : null;
     return paired ? `本地 · 自动配对 ${basename(paired)}` : '本地（没有同名 .lrc）';
   };
 
+  /** 「音频」那一行右侧显示什么。 */
+  const audioValue = state.audios.length === 0 ? '(未选择)'
+    : state.audios.length === 1 ? basename(state.audios[0])
+      : `${state.audios.length} 首（${basename(state.audios[0])} 等）`;
+
   // group 只写在每组第一项上，渲染时插一行小标题
   const menu = [
-    { key: 'audio', group: '输入', label: '音频', value: state.audio ? basename(state.audio) : '(未选择)', to: 'pickAudio' as View },
+    { key: 'audio', group: '输入', label: '音频', value: audioValue, to: 'pickAudio' as View },
     { key: 'lyric', label: '歌词', value: lyricValue(lyric), to: 'pickLrc' as View },
     { key: 'mode', group: '效果', label: '视觉效果', value: `${labelOf(MODE_LABELS, state.mode)} (${state.mode})`, to: 'mode' as View },
     { key: 'background', label: '背景效果', value: labelOf(BACKGROUND_LABELS, state.background), to: 'background' as View },
     { key: 'intensity', label: '动画强度', value: labelOf(INTENSITY_LABELS, state.intensity), to: 'intensity' as View },
     { key: 'quality', group: '输出', label: '清晰度', value: state.quality, to: 'quality' as View },
+    { key: 'jobs', label: '并行', value: `${jobs} 首`, to: 'main' as View },
     { key: 'settings', group: '其他', label: 'ffmpeg', value: ffmpegPref ? labelOf(FFMPEG_LABELS, ffmpegPref) : '待选择', to: 'settings' as View },
     { key: 'run', label: '', value: '', to: 'main' as View },
   ];
@@ -446,11 +665,18 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
       case 'pickAudio': {
         const { dirs, files } = listDir(dir, AUDIO_EXT);
         const parent = dirname(dir);
-        const chosen = live.current.state.audio;
+        const count = live.current.state.audios.length;
         return [
+          // 「完成选择」放最前：勾完不用记着 Esc 怎么按
+          { key: '__done__', label: `✔ 完成选择（已选 ${count} 首）`, color: 'green' },
           ...(parent !== dir ? [{ key: '..', label: '..（上级目录）', color: 'gray' }] : []),
           ...dirs.map((n) => ({ key: `dir:${n}`, label: `${n}/`, color: 'blue' })),
-          ...files.map((n) => ({ key: join(dir, n), label: n, current: join(dir, n) === chosen })),
+          ...files.map((n) => {
+            const path = join(dir, n);
+            const selected = live.current.state.audios.includes(path);
+            // Enter / 空格都只切换勾选；[x] 让「已经选了哪些」一眼可见
+            return { key: path, label: `${selected ? '[x]' : '[ ]'} ${n}`, current: selected };
+          }),
         ];
       }
       case 'pickLrc': {
@@ -495,15 +721,28 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
     const { view: v, cursor: c } = live.current;
 
     if (v === 'main') {
+      // 「并行」不是一个子列表：Enter 直接循环到下一个取值
+      if (menu[c].key === 'jobs') {
+        const i = JOBS_CYCLE.indexOf(live.current.jobs);
+        const next = JOBS_CYCLE[(i + 1) % JOBS_CYCLE.length];
+        setJobs(next);
+        saveConfig({ jobs: next });
+        return;
+      }
       const target = menu[c].to;
       if (target === 'main') {                       // 「开始渲染」按钮
-        if (run?.running) { abortRef.current?.abort(); return; }
+        if (run?.running) { stopAll(); return; }
         void startRender();
         return;
       }
       setView(target);
-      // 每一项都带 current，直接找它 —— 比按字段名反查通用，设置页也能自动定位到当前选择
-      setCursor(Math.max(0, options(target).findIndex((o) => o.current)));
+      // 每一项都带 current，直接找它 —— 比按字段名反查通用，设置页也能自动定位到当前选择。
+      // 音频列表还没勾过时，落到第一个文件（跳过「完成选择」和目录导航）。
+      const opts = options(target);
+      const selectedAt = opts.findIndex((o) => o.current);
+      setCursor(selectedAt >= 0 ? selectedAt : target === 'pickAudio'
+        ? Math.max(0, opts.findIndex((o) => o.key !== '__done__' && o.key !== '..' && !o.key.startsWith('dir:')))
+        : 0);
       setError('');
       return;
     }
@@ -512,6 +751,21 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
     // 目录项只换目录、留在选择视图里，不当作「选中了一个文件」
     if (picked.key === '..') { setDir(dirname(dir)); setCursor(0); return; }
     if (picked.key.startsWith('dir:')) { setDir(join(dir, picked.key.slice(4))); setCursor(0); return; }
+    // 「音频」：Enter / 空格都是切换勾选、留在列表；勾完按 Esc 或「完成选择」返回
+    if (v === 'pickAudio') {
+      if (picked.key === '__done__') {
+        setView('main');
+        setCursor(0);
+        return;
+      }
+      setState((s) => ({
+        ...s,
+        audios: s.audios.includes(picked.key)
+          ? s.audios.filter((x) => x !== picked.key)
+          : [...s.audios, picked.key],
+      }));
+      return;
+    }
     // 「歌词」：联网项 / 本地兜底项用固定的 key，其余一律当作具体的 .lrc 路径
     if (v === 'pickLrc') {
       const choice = LYRIC_CYCLE.find((x) => lyricChoiceKey(x) === picked.key);
@@ -531,7 +785,7 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
       return;
     }
     const patch: Partial<typeof state> = {
-      pickAudio: { audio: picked.key },
+      pickAudio: {},
       mode: { mode: picked.key }, background: { background: picked.key },
       intensity: { intensity: picked.key }, quality: { quality: picked.key },
     }[v] as Partial<typeof state>;
@@ -577,14 +831,42 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
     }
     // 渲染进行中：只认「停止」，别让误触改了配置（改也影响不了已经在跑的任务）
     if (run?.running) {
-      if (key.ctrl && input === 'c') { abortRef.current?.abort(); return; }
-      if (key.return || input === 's') { abortRef.current?.abort(); return; }
+      const jobCount = run.jobs?.length ?? 1;
+      // a / Ctrl-C = 全部停止
+      if ((key.ctrl && input === 'c') || input === 'a') { stopAll(); return; }
+      if (jobCount > 1) {
+        // 多首：↑↓ 选任务，Enter / s 只停选中的那首
+        if (key.upArrow || input === 'k') { setJobCursor((x) => (x - 1 + jobCount) % jobCount); return; }
+        if (key.downArrow || input === 'j') { setJobCursor((x) => (x + 1) % jobCount); return; }
+        if (key.return || input === 's') { stopJob(jobCursor); return; }
+        // 1..6 直接停对应那一首，不用先移动光标
+        if (/^[1-6]$/.test(input)) {
+          const idx = Number(input) - 1;
+          if (idx < jobCount) { stopJob(idx); }
+          return;
+        }
+        return;
+      }
+      if (key.return || input === 's') { stopAll(); return; }
       return;
     }
     if (key.ctrl && input === 'c') { setConfirmExit(true); return; }
     // q 在任何界面都先弹二次确认 —— 不必先退回主菜单
     if (input === 'q') { setConfirmExit(true); return; }
     if (key.escape) { setView('main'); setCursor(0); setError(''); return; }
+    // 「音频」列表里空格多选：不动光标、不离开视图
+    if (v === 'pickAudio' && input === ' ') {
+      const opt = items[c];
+      if (opt && opt.key !== '__done__' && opt.key !== '..' && !opt.key.startsWith('dir:')) {
+        setState((s) => ({
+          ...s,
+          audios: s.audios.includes(opt.key)
+            ? s.audios.filter((x) => x !== opt.key)
+            : [...s.audios, opt.key],
+        }));
+      }
+      return;
+    }
     // s 是进入设置页的快捷方式，和主菜单 Enter 走同一个落点（定位到当前选择）
     if (v === 'main' && input === 's') {
       setView('settings');
@@ -615,6 +897,13 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
         const next = pick(list, cur ? list.indexOf(cur) : 0);
         setFfmpegPref(next);
         saveConfig({ ffmpeg: next });
+        setError('');
+        return;
+      }
+      if (row === 'jobs') {
+        const next = pick(JOBS_CYCLE, JOBS_CYCLE.indexOf(live.current.jobs));
+        setJobs(next);
+        saveConfig({ jobs: next });
         setError('');
         return;
       }
@@ -707,7 +996,9 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
   // 渲染中除停止键以外的按键都被吃掉（见 useInput 的 run.running 分支），
   // 底部提示必须跟着变，否则还写着「q 退出」但按了没反应
   const hint = run?.running
-    ? (run.label === '获取歌词' ? 'Enter / s / Ctrl-C 取消取词' : 'Enter / s / Ctrl-C 停止渲染')
+    ? (run.jobs && run.jobs.length > 1
+      ? '↑↓ 选择   Enter 停止选中   1-6 直接停止   a / Ctrl-C 全部停止'
+      : (run.label === '获取歌词' ? 'Enter / s / Ctrl-C 取消取词' : 'Enter / s / Ctrl-C 停止渲染'))
     : view === 'main'
       ? '↑↓/jk 选择   ←→ 切换   Enter 确认   s ffmpeg   q 退出'
       : '↑↓/jk 选择   Enter 确认   Esc 返回';
@@ -731,14 +1022,15 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
                 // 按钮：未选中是幽灵按钮，选中变实心；渲染中变红并改成「停止」
                 const bg = busy ? 'red' : active ? 'cyan' : undefined;
                 const fg = busy || active ? 'black' : 'cyan';
-                const text = busy ? '   ■  停止渲染   ' : '  ▶  开始渲染   ';
+                const many = (run?.jobs?.length ?? 0) > 1;
+                const text = busy ? (many ? '   ■  全部停止   ' : '   ■  停止渲染   ') : '  ▶  开始渲染   ';
                 return (
                   <Box key={m.key} flexDirection="column" marginTop={1}>
                     <Box>
                       <Text>  </Text>
                       <Text bold backgroundColor={bg} color={fg}>{text}</Text>
                     </Box>
-                    {run ? <RunPanel run={run} startedAt={startedAt} width={W} /> : null}
+                    {run ? <RunPanel run={run} startedAt={startedAt} width={W} cursor={jobCursor} /> : null}
                   </Box>
                 );
               }
@@ -755,7 +1047,8 @@ const App: React.FC<{ startDir: string; onDone: (job: Job | null) => void }> = (
             })
             : <List
                 title={view === 'settings' ? 'ffmpeg' : dir}
-                hint={view === 'pickLrc' ? '联网在前、本地兜底；选过就记住' : ''}
+                hint={view === 'pickLrc' ? '联网在前、本地兜底；选过就记住'
+                  : view === 'pickAudio' ? 'Enter / 空格 勾选或取消   Esc 或「完成选择」返回' : ''}
                 items={items} cursor={cursor} empty="(此目录没有可选文件)"
               />}
         </Box>

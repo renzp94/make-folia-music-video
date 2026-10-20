@@ -52,7 +52,10 @@ export async function launchChrome({ width = 1920, height = 1080 }: { width?: nu
   // 端口从 stderr 的 "DevTools listening on ws://127.0.0.1:PORT/..." 里读
   const port = await new Promise<number>((resolve, reject) => {
     let buf = '';
-    const to = setTimeout(() => reject(new Error('Chrome 启动超时')), 20000);
+    // 超时时带上 Chrome 自己的输出 —— 并发启动出问题时，光看「超时」没法定位
+    const to = setTimeout(() => reject(new Error(
+      `Chrome 启动超时${buf.trim() ? `：${buf.trim().slice(-300)}` : ''}`,
+    )), 20000);
     // stdio 里已声明 stderr: 'pipe'，这里必然非空
     proc.stderr!.on('data', (c) => {
       buf += c.toString();

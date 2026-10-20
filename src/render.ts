@@ -7,11 +7,11 @@
 
 import { EMBEDDED_FFMPEG, EMBEDDED_FFMPEG_VERSION, EMBEDDED_SITE } from './assets.ts';
 import { spawn, type SpawnOptions } from 'node:child_process';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, openSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { computeSpectrumFrames, frameToAudioBytes } from './spectrum.ts';
-import { renderFramesParallel, type SpecFrame } from './stitch.ts';
+import { renderFrames, type SpecFrame } from './stitch.ts';
 import type { Line } from './lrc.ts';
 
 /** 用哪一份 ffmpeg。`auto` = 有系统就用系统，没有才用内置。 */
@@ -40,6 +40,9 @@ export function setFfmpegPreference(p: FfmpegPreference): void {
 /** 释放进度的回调：0..1。已有缓存时同步报 1。 */
 export type ReleaseProgress = (progress: number) => void;
 
+/** 在途的释放任务 —— 多首歌并行时保证只写一次盘。 */
+let materializing: Promise<string> | null = null;
+
 /**
  * 把内置的那份 ffmpeg 释放到临时目录并返回路径。
  *
@@ -55,35 +58,46 @@ async function materializeEmbedded(onProgress?: ReleaseProgress): Promise<string
     onProgress?.(1);
     return dest;
   }
-
-  const part = `${dest}.part`;
-  const src = Bun.file(EMBEDDED_FFMPEG);
-  const total = src.size || 1;
-  let written = 0;
-  let fd: number | null = null;
-  try {
-    fd = openSync(part, 'w');
-    const reader = src.stream().getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      writeSync(fd, value as Uint8Array);
-      written += (value as Uint8Array).length;
-      onProgress?.(Math.min(1, written / total));
+  // 多首歌并行时会有多个任务同时首次进来；复用同一份在途 Promise，
+  // 避免两个写盘流同时写同一个 .part。
+  if (materializing) {
+    return materializing;
+  }
+  materializing = (async (): Promise<string> => {
+    const part = `${dest}.part`;
+    const src = Bun.file(EMBEDDED_FFMPEG);
+    const total = src.size || 1;
+    let written = 0;
+    let fd: number | null = null;
+    try {
+      fd = openSync(part, 'w');
+      const reader = src.stream().getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        writeSync(fd, value as Uint8Array);
+        written += (value as Uint8Array).length;
+        onProgress?.(Math.min(1, written / total));
+      }
+      closeSync(fd);
+      fd = null;
+      chmodSync(part, 0o755);
+      renameSync(part, dest);
+      onProgress?.(1);
+      return dest;
+    } catch (error) {
+      if (fd !== null) { try { closeSync(fd); } catch { /* 关不上也只能算了 */ } }
+      rmSync(part, { force: true });
+      throw new Error(
+        `内置的 ffmpeg 释放失败：${(error as Error).message}\n`
+        + '请改用自己的 ffmpeg：macOS 用 brew install ffmpeg。',
+      );
     }
-    closeSync(fd);
-    fd = null;
-    chmodSync(part, 0o755);
-    renameSync(part, dest);
-    onProgress?.(1);
-    return dest;
-  } catch (error) {
-    if (fd !== null) { try { closeSync(fd); } catch { /* 关不上也只能算了 */ } }
-    rmSync(part, { force: true });
-    throw new Error(
-      `内置的 ffmpeg 释放失败：${(error as Error).message}\n`
-      + '请改用自己的 ffmpeg：macOS 用 brew install ffmpeg。',
-    );
+  })();
+  try {
+    return await materializing;
+  } finally {
+    materializing = null;
   }
 }
 
@@ -277,7 +291,7 @@ function serveStatic(dir: string): { url: string; stop: () => void } {
 export interface RenderOptions {
   width?: number; height?: number; fps?: number;
   mode?: string; background?: string;
-  theme?: unknown; tunings?: unknown; crf?: number; workers?: number;
+  theme?: unknown; tunings?: unknown; crf?: number;
 }
 
 /** renderToMp4 的任务描述。 */
@@ -301,7 +315,6 @@ export interface RenderJob {
   /** 取消信号：abort 后杀掉 Chrome 与 ffmpeg，并删掉半成品输出。 */
   signal?: AbortSignal;
   onStage?: (stage: string, detail: string) => void;
-  keepFrames?: boolean;
 }
 
 /** renderToMp4 的结果。 */
@@ -316,16 +329,16 @@ export interface RenderResult {
  * @param {Array}   job.lines       歌词行（Folia Line 结构或 {text,startTime,endTime,words}）
  * @param {string}  job.output      输出 mp4 路径
  * @param {string}  job.siteDir     含 index.html + visualizer.js/css 的目录
- * @param {object} [job.render]     { width,height,fps,mode,background,theme,tunings,workers,crf }
+ * @param {object} [job.render]     { width,height,fps,mode,background,theme,tunings,crf }
  * @param {Function} [job.onProgress] (0..1) => void
  * @param {Function} [job.onStage]    (stage, detail) => void
  */
 export async function renderToMp4(job: RenderJob): Promise<RenderResult> {
-  const { audioPath, lines, output, siteDir, signal, cover, coverFrom, onFfmpegProgress, onProgress = () => {}, onEncodeProgress = () => {}, onStage = () => {}, keepFrames = false } = job;
+  const { audioPath, lines, output, siteDir, signal, cover, coverFrom, onFfmpegProgress, onProgress = () => {}, onEncodeProgress = () => {}, onStage = () => {} } = job;
   const {
     width = 1920, height = 1080, fps = 60,
     mode = 'classic', background = 'latent',
-    theme, tunings, crf = 16, workers = 1,
+    theme, tunings, crf = 16,
   } = job.render ?? {};
 
   // 先定下用哪一份，再解析 —— 用户显式选了系统那份而它不可用时，这里会抛
@@ -350,19 +363,10 @@ export async function renderToMp4(job: RenderJob): Promise<RenderResult> {
 
   // ② 逐帧 + ③ 合成
   //
-  // 单 worker 时走**流式管道**：先起 ffmpeg，渲一帧就往它的 stdin 写一帧，
-  // 全程不落盘。落盘版本会生成 totalFrames 个 jpg（一整首约 4~6 GB），
-  // 中途崩掉还得自己清；管道模式内存里最多压一两帧。
-  //
-  // 多 worker 时必须落盘 —— 分片各写各的文件，ffmpeg 才能按 f%06d 的序号
-  // 拼回正确顺序；管道是单条流，给不了这个保证。
-  const streaming = workers <= 1;
+  // **流式管道**：先起 ffmpeg，渲一帧就往它的 stdin 写一帧，全程不落盘。
+  // 落盘版本会生成 totalFrames 个 jpg（一整首约 4~6 GB），中途崩掉还得自己清；
+  // 管道模式内存里最多压一两帧。
   const site = serveStatic(siteDir);
-  let framesDir: string | undefined;
-  if (!streaming) {
-    framesDir = join(output, '..', `.frames-${Date.now()}`);
-    mkdirSync(framesDir, { recursive: true });
-  }
 
   const specSlim: SpecFrame[] = specFrames.map((b, i) => {
     const a = frameToAudioBytes(b);
@@ -370,7 +374,7 @@ export async function renderToMp4(job: RenderJob): Promise<RenderResult> {
              vocal: a.vocal, treble: a.treble, lineIndex: findLineIndex(foliaLines, i / fps) };
   });
 
-  onStage('render', streaming ? '逐帧（流式管道）' : `${workers} 路并行`);
+  onStage('render', '逐帧（流式管道）');
   // 只累计**逐帧渲染**的耗时：流式模式下渲染和合成是交织的，但 renderFps
   // 要回答的是「每秒渲多少帧」，把合成时间算进来会让这个数偏小。
   let renderSec = 0;
@@ -409,56 +413,52 @@ export async function renderToMp4(job: RenderJob): Promise<RenderResult> {
       stream.once('drain', () => { stream.off('error', onErr); resolve(); });
     });
 
+  let ff: ReturnType<typeof spawn> | null = null;
+  let ffErr = '';
   try {
-    if (streaming) {
-      const ff = spawn(await resolveFfmpeg(currentPreference),
-        ffmpegArgs(['-f', 'image2pipe', '-framerate', String(fps), '-i', 'pipe:0']),
-        { stdio: ['pipe', 'pipe', 'inherit'], signal } as SpawnOptions);
-      attachProgress(ff);
-      // ffmpeg 提前死掉（比如参数不对）时，写 stdin 会 EPIPE —— 让它冒出来，
-      // 否则渲染会白跑到底才在 await ff 那里报错。
-      const ffDone = new Promise<number | null>((res) => ff.on('close', res));
-      try {
-        const t0 = Date.now();
-        await renderFramesParallel({
-          siteUrl: site.url, onFrameData: (buf) => writeFrame(ff.stdin!, buf),
-          totalFrames, fps, foliaLines, specFrames: specSlim,
-          width, height, mode, background, theme, tunings, workers, fmt: 'jpeg',
-          quality: Number(process.env.FOLIA_JPEG_QUALITY) || 95,
-          onProgress, signal, cover: coverUrl,
-        });
-        renderSec = (Date.now() - t0) / 1000;
-        ff.stdin?.end();
-      } catch (error) {
-        ff.stdin?.destroy();
-        throw error;
-      }
-      const code = await ffDone;
-      if (code !== 0) throw new Error(`ffmpeg 合成失败，退出码 ${code}`);
-    } else {
+    ff = spawn(await resolveFfmpeg(currentPreference),
+      ffmpegArgs(['-f', 'image2pipe', '-framerate', String(fps), '-i', 'pipe:0']),
+      { stdio: ['pipe', 'pipe', 'pipe'], signal } as SpawnOptions);
+    // stderr 自己收着：TUI 下直接 inherit 会把 ffmpeg 的报错糊到界面上
+    ff.stderr?.on('data', (c: Buffer) => { ffErr = (ffErr + c.toString()).slice(-2000); });
+    // spawn 的 signal 被 abort 时会 emit AbortError；不接住就是未捕获异常，
+    // 会在界面上糊一段堆栈。真正的取消由下面的 catch 统一处理。
+    ff.on('error', (e: Error) => { ffErr += `\n${e.message}`; });
+    attachProgress(ff);
+    // ffmpeg 提前死掉（比如参数不对）时，写 stdin 会 EPIPE —— 让它冒出来，
+    // 否则渲染会白跑到底才在 await ff 那里报错。
+    const ffDone = new Promise<number | null>((res) => ff!.on('close', res));
+    try {
       const t0 = Date.now();
-      await renderFramesParallel({
-        siteUrl: site.url, framesDir, totalFrames, fps, foliaLines, specFrames: specSlim,
-        width, height, mode, background, theme, tunings, workers, fmt: 'jpeg',
+      await renderFrames({
+        siteUrl: site.url, onFrameData: (buf) => writeFrame(ff!.stdin!, buf),
+        fps, foliaLines, specFrames: specSlim,
+        width, height, mode, background, theme, tunings,
         quality: Number(process.env.FOLIA_JPEG_QUALITY) || 95,
         onProgress, signal, cover: coverUrl,
       });
       renderSec = (Date.now() - t0) / 1000;
-      onStage('encode', 'ffmpeg 合成');
-      const ff = spawn(await resolveFfmpeg(currentPreference),
-        ffmpegArgs(['-framerate', String(fps), '-i', join(framesDir!, 'f%06d.jpg')]),
-        { stdio: ['ignore', 'pipe', 'inherit'], signal } as SpawnOptions);
-      attachProgress(ff);
-      const code = await new Promise<number | null>((res) => ff.on('close', res));
-      if (code !== 0) throw new Error(`ffmpeg 合成失败，退出码 ${code}`);
+      ff.stdin?.end();
+    } catch (error) {
+      ff.stdin?.destroy();
+      throw error;
+    }
+    const code = await ffDone;
+    if (code !== 0) {
+      throw new Error(`ffmpeg 合成失败，退出码 ${code}`
+        + (ffErr.trim() ? `\n${ffErr.trim().slice(-500)}` : ''));
     }
   } catch (error) {
-    // 被取消：ffmpeg 吃了 SIGTERM，输出是个播不了的半成品，删掉免得用户当成成片
+    // 取消时 ffmpeg 可能还在写 trailer（-movflags +faststart 要 re-open 输出文件）。
+    // 必须先杀掉并等它退出，再删半成品 —— 否则它会 re-open 已删掉的文件并刷错误。
+    if (ff && ff.exitCode === null && ff.signalCode === null) {
+      ff.kill('SIGKILL');
+      await new Promise<void>((res) => { ff!.once('close', () => res()); });
+    }
     rmSync(output, { force: true });
     throw error;
   } finally {
     site.stop();
-    if (framesDir && !keepFrames) rmSync(framesDir, { recursive: true, force: true });
   }
 
   return {

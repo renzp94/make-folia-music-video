@@ -36,7 +36,22 @@
 
 ---
 
-## 2. 并行渲染（已实现，但默认关闭）
+## 2. 帧级并行（已放弃，改为按歌并行）
+
+**2026-10-19 结论：不再做同一首歌的切帧并行，改为「多首歌同时渲染」**
+（CLI 的 `--jobs`、TUI 的「并行」）。根因已定位：Framer Motion 对 opacity/transform
+走 WAAPI 加速，`element.animate()` 拿到的 `startTime` 基于我们冻结的 fake `performance.now`，
+而 Web Animations 的 `document.timeline` 是真实时钟。分片冷启动时 fake 时间直接跳到
+`from - warmup`，动画的 `startTime` 落在真实 timeline 的未来 → 动画永不开始，
+表现为旧行不消失、当前行 `opacity: 0 / blur(10px)`。已在驱动里按 fake 时钟重设
+`currentTime` 修掉这个错位。
+
+但修完后仍有历史依赖：整树 reset、行切换序列、合成器光栅化状态都要求分片预热足够长。
+实测需要约 600 帧（10 秒）预热才能让第三片与单片接近（PSNR 72–78dB）；180/300/486 帧
+仍有可见差异（21–31dB）。每片 500 帧 + 600 预热时，4 路并行的收益只剩约 1.8x，
+达不到 2.5x。因此放弃帧级并行。
+
+以下为当时的排查记录，保留备查。
 
 **现状**：并行代码在 `src/stitch.ts` 的 `renderFramesParallel` 里，`workers > 1` 才启用。
 CLI 默认 `--workers 1`，即**单片**（一个 Chrome 从第 0 帧连续跑到底）。

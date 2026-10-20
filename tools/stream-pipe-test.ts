@@ -45,7 +45,7 @@ let result;
 try {
   result = await renderToMp4({
     audioPath: CLIP, lines, output: OUT, siteDir: '',
-    render: { width: 640, height: 360, fps: 30, workers: 1 },
+    render: { width: 640, height: 360, fps: 30 },
     onStage: () => {},
   });
 } finally {

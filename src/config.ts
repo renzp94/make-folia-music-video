@@ -21,6 +21,8 @@ export interface Config {
    * 会让「本地兜底」静默变成「只用某一个源联网」。
    */
   lyricChoice?: LyricChoiceValue;
+  /** 同时渲染几首（2..6）。不写就是 3。 */
+  jobs?: number;
 }
 
 export const CONFIG_PATH = join(homedir(), '.config', 'folia-video', 'config.json');
