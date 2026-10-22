@@ -3,6 +3,12 @@
   "private": true,
   "type": "module",
   "description": "把 EchoMusic 的 Folia 歌词页离线渲染成 MP4（不是录屏）",
+  "imports": {
+    "#ffmpeg-bin": {
+      "win32": "./vendor/ffmpeg/ffmpeg-win32-x64.exe",
+      "default": "./vendor/ffmpeg/ffmpeg-darwin-arm64"
+    }
+  },
   "dependencies": {
     "@applemusic-like-lyrics/ttml": "1.0.1",
     "@xmldom/xmldom": "0.9.12",
@@ -16,7 +22,8 @@
     "start": "bun index.ts",
     "check": "bun check",
     "build:app": "bun build index.ts --compile --minify --outfile=dist/make-folia-video",
-    "build:mac": "bun build index.ts --compile --minify --target=bun-darwin-arm64 --outfile=dist/make-folia-video-macos-arm64"
+    "build:mac": "bun build index.ts --compile --minify --target=bun-darwin-arm64 --outfile=dist/make-folia-video-macos-arm64",
+    "build:win": "bun build index.ts --compile --minify --conditions=win32 --target=bun-windows-x64 --outfile=dist/make-folia-video-windows-x64.exe"
   },
   "devDependencies": {
     "@types/bun": "^1.4.3",

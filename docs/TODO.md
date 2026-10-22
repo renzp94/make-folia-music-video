@@ -84,26 +84,19 @@ CLI 默认 `--workers 1`，即**单片**（一个 Chrome 从第 0 帧连续跑�
 
 ---
 
-## 3. Windows 版打包
+## 3. Windows 版打包（已解决）
 
-macOS 版已经自包含（内嵌 bundle + ffmpeg）。Windows 版缺一份 **win 的静态 ffmpeg**——
-`eugeneware/ffmpeg-static` 的 release 里有（`ffmpeg-win32-x64.gz`，tag `b6.1.1`），
-但本机下它时 GitHub 的 HTTP2 连接一直断（`Error in the HTTP2 framing layer`），
-试过 `--http1.1` 也没走完。
+`build:win` 已可用，在 Mac 上就能交叉编译：
 
-要做的话：
-
-1. 拿到 `ffmpeg-win32-x64.gz`，解压成 `vendor/ffmpeg/ffmpeg-win32-x64.exe`
-   （也可以从 https://www.gyan.dev/ffmpeg/builds/ 下 `ffmpeg-release-essentials.zip`）
-2. 同样放一个 `vendor/ffmpeg/ffmpeg-win32-x64.exe.d.ts`
-3. 在 `src/assets.ts` 里按平台条件 import —— **注意**：`with { type: 'file' }` 是静态导入，
-   两个平台的二进制会**同时**被打进产物（体积 +43 MB × 2）。要避免的话得改成运行时
-   从 `Bun.embeddedFiles` 按名字取，或者各平台分别构建。
-4. 加回 `build:win` 脚本：`--target=bun-windows-x64 --outfile=dist/make-folia-video-windows-x64.exe`
-
-**坑**：现在 `EMBEDDED_FFMPEG` 是写死的 darwin 那份。在没有 Windows 二进制的情况下
-直接 `--target=bun-windows-x64` 会打出一个**内嵌着 macOS 二进制**的 Windows 程序，
-在 Windows 上必然崩 —— 所以 `build:win` 已从 package.json 移除。
+- Windows 静态 ffmpeg 从 npmmirror 的 ffmpeg-static 镜像取（GitHub 直连会断）：
+  `https://registry.npmmirror.com/-/binary/ffmpeg-static/b6.1.1/ffmpeg-win32-x64.gz`，
+  解压后放到 `vendor/ffmpeg/ffmpeg-win32-x64.exe`（FFmpeg 6.1.1）。
+- `src/assets.ts` 不直接 import 具体文件，而是 `#ffmpeg-bin`；`package.json` 的 `imports`
+  在 `win32` 条件下映射到 win 二进制、默认映射到 darwin。`build:win` 加
+  `--conditions=win32` 让打包器选中对应那份 —— 实测产物里只有目标平台的二进制，
+  不会两份都塞进去（`with { type: 'file' }` 是静态导入，不这样做会 +130 MB）。
+- 运行时释放的文件名在 Windows 上带 `.exe`；`src/cdp.ts` 的 Chrome 候选表已加入
+  Program Files / LOCALAPPDATA 下的 Chrome 与 Edge。
 
 ---
 

@@ -78,8 +78,9 @@ bun index.ts song.mp3 --offset -500
 ## 打成单文件可执行程序
 
 ```bash
-bun run build:app          # → dist/make-folia-video（约 122 MB，当前平台）
+bun run build:app          # → dist/make-folia-video（约 130 MB，macOS 当前平台）
 bun run build:mac          # → dist/make-folia-video-macos-arm64（交叉编译，在 Mac 上出 macOS 版）
+bun run build:win          # → dist/make-folia-video-windows-x64.exe（交叉编译，在 Mac 上出 Windows 版）
 ./dist/make-folia-video
 ```
 
@@ -87,10 +88,12 @@ bun run build:mac          # → dist/make-folia-video-macos-arm64（交叉编�
 
 - **bundle**（9.8 MB 的 `visualizer.js` + HTML/CSS）内嵌在里面，不用另带 `site/` 目录。
   `serveStatic` 的优先级是磁盘 > 内嵌，所以开发时重建了 bundle 会立即生效、不必重新打包。
-- **ffmpeg**（43 MB 静态构建）也内嵌了。运行时优先用 `PATH` 里的；没有才把内嵌的那份
-  释放到临时目录再执行（`/$bunfs` 里的虚拟文件不能直接 spawn，必须先落盘加执行位）。
+- **ffmpeg**（macOS 50 MB / Windows 79 MB 静态构建）也内嵌了。运行时优先用 `PATH` 里的；
+  没有才把内嵌的那份释放到临时目录再执行（`/$bunfs` 里的虚拟文件不能直接 spawn，必须先落盘加执行位）。
+  构建时按目标平台只嵌入对应那一份（`package.json` 的 `#ffmpeg-bin` 映射 + `--conditions=win32`）。
 
-Windows 版还没做 —— 需要一份 win 的静态 ffmpeg，做法见 `docs/TODO.md`。
+Windows 版同样自包含，但**渲染仍然依赖本机的 Chrome 或 Edge**（和 macOS 版一样，只是换了个可执行文件）；
+找不到时可以用 `CHROME_PATH` 指定。
 
 > ⚠️ 改完 `src/` 后**必须重新 build**。`dist/` 里是打包那一刻的静态快照，不会自动跟着源码变 ——
 > 拿旧产物测新功能，会以为是代码没写对。

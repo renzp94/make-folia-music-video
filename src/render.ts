@@ -51,7 +51,9 @@ let materializing: Promise<string> | null = null;
  * `.part` 再原子改名 —— 中途失败不会留下一个看着像完整、实则截断的文件。
  */
 async function materializeEmbedded(onProgress?: ReleaseProgress): Promise<string> {
-  const dest = join(tmpdir(), `make-folia-video-ffmpeg-${process.platform}-${process.arch}`);
+  // Windows 上必须带 .exe 后缀，否则 CreateProcess 不认
+  const suffix = process.platform === 'win32' ? '.exe' : '';
+  const dest = join(tmpdir(), `make-folia-video-ffmpeg-${process.platform}-${process.arch}${suffix}`);
 
   // 已经释放过就直接用（判断依据同上：存在且非空）
   if (existsSync(dest) && statSync(dest).size > 0) {
@@ -90,7 +92,7 @@ async function materializeEmbedded(onProgress?: ReleaseProgress): Promise<string
       rmSync(part, { force: true });
       throw new Error(
         `内置的 ffmpeg 释放失败：${(error as Error).message}\n`
-        + '请改用自己的 ffmpeg：macOS 用 brew install ffmpeg。',
+        + '请改用自己的 ffmpeg：macOS 用 brew install ffmpeg，Windows 用 winget install ffmpeg。',
       );
     }
   })();

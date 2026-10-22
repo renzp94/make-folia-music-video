@@ -5,8 +5,23 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+// Windows 的安装位置不固定，按 Program Files / 用户目录拼一遍
+const WINDOWS_CHROME_CANDIDATES: string[] = process.platform === 'win32'
+  ? [process.env.PROGRAMFILES, process.env['PROGRAMFILES(X86)'], process.env.LOCALAPPDATA]
+    .flatMap((base) => base
+      ? [
+          join(base, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+          join(base, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        ]
+      : [])
+  : [];
+
 const CHROME_CANDIDATES: string[] = [
   process.env.CHROME_PATH,
+  Bun.which('chrome'),
+  Bun.which('msedge'),
+  Bun.which('chromium'),
+  ...WINDOWS_CHROME_CANDIDATES,
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   '/Applications/Chromium.app/Contents/MacOS/Chromium',
   '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
