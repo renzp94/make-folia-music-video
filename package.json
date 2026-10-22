@@ -21,7 +21,7 @@
   "scripts": {
     "start": "bun index.ts",
     "check": "bun check",
-    "build:app": "bun build index.ts --compile --minify --outfile=dist/make-folia-video",
+    "build": "bun run build:mac && bun run build:win",
     "build:mac": "bun build index.ts --compile --minify --target=bun-darwin-arm64 --outfile=dist/make-folia-video-macos-arm64",
     "build:win": "bun build index.ts --compile --minify --conditions=win32 --target=bun-windows-x64 --outfile=dist/make-folia-video-windows-x64.exe"
   },

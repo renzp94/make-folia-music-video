@@ -1,7 +1,7 @@
 # 依赖
 node_modules/
 
-# 构建产物（bun run build:app / build:mac 的输出）
+# 构建产物（bun run build / build:mac / build:win 的输出）
 dist/
 
 # 渲染中间产物：每帧一张 jpg，正常应该在渲染结束后清掉。

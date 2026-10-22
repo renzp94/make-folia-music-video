@@ -4,15 +4,20 @@
 
 # make-folia-music-video
 
-把 Folia 歌词页的视觉效果**离线渲染**成 MP4（一首歌一个文件）。**不是录屏** —— 逐帧驱动 headless Chrome，所以画质不受屏幕和录制软件限制。
+把 Folia 歌词页的视觉效果**离线渲染**成 MP4，一首歌一个文件。
 
-复用 `echo-folia-plugin` 的那份 `visualizer.js` bundle，因此和 EchoMusic 歌词页里看到的完全一致。
+**不是录屏**：逐帧驱动 headless Chrome 推进动画，画质由渲染参数决定，不受屏幕分辨率和录制软件限制。
+视觉部分复用 Folia 的 `visualizer.js` bundle，输出与歌词页所见一致；音频、歌词、ffmpeg 全部在本地完成。
+
+支持 macOS 与 Windows，可打包成带内置 ffmpeg 的单个可执行文件。
 
 ## 快速开始
 
+需要 [Bun](https://bun.sh) 和本机的 Chrome / Edge（渲染时驱动它）；ffmpeg 可选，没有就用内置的那份。
+
 ```bash
 bun install
-bun index.ts                    # 无参数 → 进终端界面
+bun start                       # 无参数 → 进终端界面
 ```
 
 界面里依次选：音频 → 歌词 → 视觉效果 → 背景效果 → 动画强度 → 清晰度 → 并行 → ffmpeg，然后**点「开始渲染」**。
@@ -60,7 +65,7 @@ bun index.ts <音频...> [选项]
 
 背景可选值（6 个）：`latent` `common` `monet` `nomand` `sora` `url`
 
-不传第二个参数时，先找与音频同名的 `.lrc`；**没有就连网上 QQ / 酷狗 / AMLL 搜一遍**（按此顺序，`--source` 可指定单个源，`--no-fetch` 可关掉）。搜出来的往往是逐字歌词，比行级 `.lrc` 估算的逐字效果更准。
+不显式指定 `.lrc` 时，先找与音频同名的 `.lrc`；**没有就连网上 QQ / 酷狗 / AMLL 搜一遍**（按此顺序，`--source` 可指定单个源，`--no-fetch` 可关掉）。搜出来的往往是逐字歌词，比行级 `.lrc` 估算的逐字效果更准。
 
 例子：
 
@@ -78,13 +83,14 @@ bun index.ts song.mp3 --offset -500
 ## 打成单文件可执行程序
 
 ```bash
-bun run build:app          # → dist/make-folia-video（约 130 MB，macOS 当前平台）
+bun run build              # 依次产出 macOS + Windows 两个包
 bun run build:mac          # → dist/make-folia-video-macos-arm64（交叉编译，在 Mac 上出 macOS 版）
 bun run build:win          # → dist/make-folia-video-windows-x64.exe（交叉编译，在 Mac 上出 Windows 版）
-./dist/make-folia-video
+./dist/make-folia-video-macos-arm64
+# Windows: dist\make-folia-video-windows-x64.exe
 ```
 
-产物是**自包含**的，拷到别的机器上直接能跑，不用装任何东西：
+产物是**自包含**的，拷到别的机器上直接能跑，不用装 Bun、ffmpeg，也不用带 `site/` 目录：
 
 - **bundle**（9.8 MB 的 `visualizer.js` + HTML/CSS）内嵌在里面，不用另带 `site/` 目录。
   `serveStatic` 的优先级是磁盘 > 内嵌，所以开发时重建了 bundle 会立即生效、不必重新打包。
@@ -118,7 +124,8 @@ src/batch.ts        多首渲染的并发调度
 src/cdp.ts          极简 CDP 客户端
 src/spectrum.ts     离线 FFT（对齐 Folia 的 analyser 参数）
 src/lrc.ts          LRC / 增强 LRC 解析
-src/assets.ts       bundle 内嵌声明
+src/assets.ts       bundle 与内置 ffmpeg 的内嵌声明
+vendor/ffmpeg/      内嵌的静态 ffmpeg（darwin / win32）
 site/               渲染页面 + visualizer bundle
 tools/              开发期的探针与自检脚本（未随主程序迁移到 TS）
 ```
@@ -126,7 +133,5 @@ tools/              开发期的探针与自检脚本（未随主程序迁移到
 ## 已知限制
 
 - **单首内部不切帧并行** —— 动画状态是历史依赖的（Framer Motion 的 WAAPI 动画、行切换、整树 reset），从中间时刻起跑的独立 Chrome 无法可靠重建状态，实测会糊、错位、整句不可见。所以每首仍由一个 Chrome 从第 0 帧连续跑到底；要提速就一次给多首，用 `--jobs` 并行。
-- **逐字歌词只能估算** —— 手头的 LRC 多为行级（只有每句起点），句内每个字的时刻按权重均分，而人唱得不均匀，所以个别句子会「字慢半拍」。要精准得有逐字歌词（增强 LRC / TTML）。见 `docs/TODO.md` 第 1 条。
-- **单文件可执行程序 78 MB** —— 大部分是内嵌的 bundle 和 React/ink 运行时。
-
-其余待办见 **`docs/TODO.md`**，历史背景见 **`docs/CONTEXT.md`**。
+- **逐字歌词只能估算** —— 手头的 LRC 多为行级（只有每句起点），句内每个字的时刻按权重均分，而人唱得不均匀，所以个别句子会「字慢半拍」。要精准得有逐字歌词（增强 LRC / TTML）。
+- **单文件可执行程序 130 MB（macOS）/ 184 MB（Windows）** —— 大部分是内嵌的 ffmpeg、bundle 和 React/ink 运行时。
