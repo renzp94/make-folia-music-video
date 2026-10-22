@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bar" gradientUnits="userSpaceOnUse" x1="0" y1="202" x2="0" y2="822">
+      <stop offset="0" stop-color="#c9b2ff"/>
+      <stop offset="0.35" stop-color="#a685ff"/>
+      <stop offset="0.72" stop-color="#8452f5"/>
+      <stop offset="1" stop-color="#5f1fc6"/>
+    </linearGradient>
+    <filter id="shadow" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="8" stdDeviation="18" flood-color="#2a0b55" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#shadow)" fill="url(#bar)">
+    <rect x="238" y="202"   width="56" height="620" rx="28" fill-opacity="1.00"/>
+    <rect x="320" y="243"   width="56" height="538" rx="28" fill-opacity="0.93"/>
+    <rect x="402" y="283.5" width="56" height="457" rx="28" fill-opacity="0.86"/>
+    <rect x="484" y="324.5" width="56" height="375" rx="28" fill-opacity="0.79"/>
+    <rect x="566" y="365.5" width="56" height="293" rx="28" fill-opacity="0.72"/>
+    <rect x="648" y="406"   width="56" height="212" rx="28" fill-opacity="0.65"/>
+    <rect x="730" y="447"   width="56" height="130" rx="28" fill-opacity="0.58"/>
+  </g>
+</svg>

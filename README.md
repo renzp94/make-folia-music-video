@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo-256.png" width="120" alt="make-folia-music-video">
+</p>
+
 # make-folia-music-video
 
 把 Folia 歌词页的视觉效果**离线渲染**成 MP4（一首歌一个文件）。**不是录屏** —— 逐帧驱动 headless Chrome，所以画质不受屏幕和录制软件限制。
